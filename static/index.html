@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UniChess</title>
+<style>
+  :root{
+    --bg:#14161a; --panel:#1c1f26; --line:#2a2f3a; --fg:#e6e9ef; --dim:#8b93a5;
+    --light:#e8ddc8; --dark:#7f8b9c; --sel:#f2c14e; --last:#5b8c5a; --danger:#c8553d;
+    --sq: 68px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:20px;display:flex;gap:24px;flex-wrap:wrap}
+  h1{font-size:20px;margin:0 0 4px;letter-spacing:.5px}
+  .sub{color:var(--dim);font-size:12px;margin-bottom:16px}
+
+  .boardwrap{display:flex;gap:10px;align-items:flex-start}
+  .evalbar{width:14px;height:calc(var(--sq)*8);background:#111;border-radius:7px;
+           overflow:hidden;position:relative;border:1px solid var(--line);flex:none}
+  .evalfill{position:absolute;left:0;right:0;bottom:0;background:#f2f2f2;transition:height .3s}
+  .evaldraw{position:absolute;left:0;right:0;background:#6b7280;opacity:.55}
+
+  .board{display:grid;grid-template-columns:repeat(8,var(--sq));
+         grid-template-rows:repeat(8,var(--sq));border:2px solid var(--line);border-radius:4px;
+         overflow:hidden;user-select:none}
+  .sq{display:flex;align-items:center;justify-content:center;position:relative;cursor:pointer;
+      font-size:calc(var(--sq)*.72);line-height:1}
+  .sq.l{background:var(--light)} .sq.d{background:var(--dark)}
+  .sq.sel{box-shadow:inset 0 0 0 4px var(--sel)}
+  .sq.last{box-shadow:inset 0 0 0 4px var(--last)}
+  .sq.check{box-shadow:inset 0 0 0 4px var(--danger)}
+  .sq .dot{position:absolute;width:26%;height:26%;border-radius:50%;background:rgba(0,0,0,.28)}
+  .sq .ring{position:absolute;inset:6%;border-radius:50%;border:5px solid rgba(0,0,0,.24)}
+  .pw{color:#fff;text-shadow:0 0 2px #000,0 0 2px #000,1px 1px 2px #000}
+  .pb{color:#14161a;text-shadow:0 0 2px rgba(255,255,255,.35)}
+  .coord{position:absolute;font-size:10px;color:rgba(0,0,0,.45);pointer-events:none}
+  .coord.f{right:3px;bottom:1px} .coord.r{left:3px;top:1px}
+
+  .panel{flex:1;min-width:300px;background:var(--panel);border:1px solid var(--line);
+         border-radius:8px;padding:16px}
+  .row{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+  label{color:var(--dim);font-size:12px}
+  select,button{background:#232833;color:var(--fg);border:1px solid var(--line);
+                border-radius:6px;padding:7px 12px;font-size:13px;cursor:pointer}
+  button:hover:not(:disabled){background:#2c3240}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.primary{background:#2f5d3a;border-color:#3c7a4b}
+  button.primary:hover:not(:disabled){background:#376c44}
+
+  .status{padding:10px 12px;border-radius:6px;background:#232833;margin-bottom:12px;
+          border-left:3px solid var(--line)}
+  .status.think{border-left-color:var(--sel)}
+  .status.over{border-left-color:var(--danger)}
+  .status.err{border-left-color:var(--danger);color:#ffb4a2}
+
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:12px;
+      color:var(--dim);margin-bottom:12px}
+  .kv b{color:var(--fg);font-weight:500}
+
+  .moves{max-height:230px;overflow-y:auto;background:#191d24;border:1px solid var(--line);
+         border-radius:6px;padding:8px;font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace}
+  .moves span.n{color:var(--dim);margin-right:4px}
+  .moves span.m{margin-right:10px}
+
+  .wdl{display:flex;height:8px;border-radius:4px;overflow:hidden;margin:6px 0 2px}
+  .wdl i{display:block;height:100%}
+  .wdl .w{background:#f2f2f2} .wdl .d{background:#6b7280} .wdl .l{background:#3f4654}
+  .wdlnum{font-size:11px;color:var(--dim);display:flex;justify-content:space-between}
+
+  details{margin-bottom:12px;border:1px solid var(--line);border-radius:6px;background:#191d24}
+  summary{padding:8px 12px;cursor:pointer;font-size:13px;color:var(--dim);user-select:none}
+  summary:hover{color:var(--fg)}
+  .setup{padding:0 12px 12px}
+  textarea{width:100%;min-height:64px;background:#14171d;color:var(--fg);
+           border:1px solid var(--line);border-radius:6px;padding:8px;font:12px/1.5
+           ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical}
+  .hint{font-size:11px;color:var(--dim);margin:6px 0}
+  .chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);cursor:pointer}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <h1>UniChess</h1>
+    <div class="sub" id="netinfo">加载中…</div>
+    <div class="boardwrap">
+      <div class="evalbar" title="引擎评估（白方视角）">
+        <div class="evalfill" id="evalfill" style="height:50%"></div>
+        <div class="evaldraw" id="evaldraw" style="bottom:45%;height:10%"></div>
+      </div>
+      <div class="board" id="board"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <label>对弈模型</label>
+      <select id="model-select"></select>
+    </div>
+    <div class="row">
+      <label>参数预设</label>
+      <select id="preset-select"></select>
+    </div>
+    <div class="row">
+      <label>执子</label>
+      <select id="side">
+        <option value="black">我执白（引擎执黑）</option>
+        <option value="white">我执黑（引擎执白）</option>
+      </select>
+    </div>
+    <div class="row">
+      <button class="primary" id="newgame">新对局</button>
+      <button id="undo">悔棋</button>
+      <button id="flip">翻转棋盘</button>
+    </div>
+
+    <div class="status" id="status">点「新对局」开始。</div>
+
+    <div class="wdl" id="wdlbar" style="display:none">
+      <i class="w" id="wdlw"></i><i class="d" id="wdld"></i><i class="l" id="wdll"></i>
+    </div>
+    <div class="wdlnum" id="wdlnum" style="display:none"></div>
+
+    <div class="kv" id="kv"></div>
+    <div class="moves" id="moves"></div>
+  </div>
+</div>
+
+<script>
+const GLYPH = {P:'♙',N:'♘',B:'♗',R:'♖',Q:'♕',K:'♔',
+               p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'};
+const FILES = 'abcdefgh';
+let S = null;          // 后端返回的状态
+let sel = null;        // 已选中的起点格
+let flipped = false;   // 棋盘是否翻转
+let busy = false;
+let boardCells = null; // 棋盘格子元素（flipped 变化时才重建）
+let boardFlipped = null;
+
+const $ = id => document.getElementById(id);
+
+const esc = v => String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let modelsData = null;   // { model_name: {status, presets, reason} }
+let sessionId = null;    // 当前会话 id（由 /api/new 返回）
+
+function onModelChange(){
+  const model = $('model-select').value;
+  const info = (modelsData && modelsData[model]) || null;
+  const presets = (info && info.presets) || [];
+  const sel = $('preset-select');
+  sel.innerHTML = presets.length
+    ? presets.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')
+    : '<option value="">（默认参数）</option>';
+}
+
+$('model-select').onchange = onModelChange;
+
+function updateNetInfo(){
+  if (!modelsData) return;
+  const names = Object.keys(modelsData);
+  const avail = names.filter(n => modelsData[n] && modelsData[n].status === 'available');
+  const pending = names.length - avail.length;
+  $('netinfo').textContent = avail.length
+    ? `可用模型：${avail.join(' / ')}` + (pending ? `（${pending} 个待接入）` : '')
+    : '暂无可用模型（引擎接入中）';
+
+  $('model-select').innerHTML = names.length
+    ? names.map(n => {
+        const info = modelsData[n] || {};
+        const ok = info.status === 'available';
+        const text = ok ? esc(n) : `${esc(n)}（${esc(info.reason || '未接入')}）`;
+        return `<option value="${esc(n)}"${ok ? '' : ' disabled'}>${text}</option>`;
+      }).join('')
+    : '<option value="">（无可用模型）</option>';
+  onModelChange();
+}
+
+function turnFromFen(fen){
+  return fen.split(' ')[1] === 'w' ? 'white' : 'black';
+}
+
+function sanHistoryFallback(){
+  // 占位引擎目前不返回 san_history，退化显示已走步数未知时留空。
+  return Array.isArray(S.san_history) ? S.san_history : [];
+}
+
+function fenToBoard(fen){
+  const rows = fen.split(' ')[0].split('/');
+  const b = {};
+  rows.forEach((row, ri) => {
+    let fi = 0;
+    for (const ch of row){
+      if (/\d/.test(ch)) { fi += +ch; }
+      else { b[FILES[fi] + (8 - ri)] = ch; fi++; }
+    }
+  });
+  return b;
+}
+
+function buildBoard(){
+  const board = $('board');
+  board.innerHTML = '';
+  boardCells = [];
+  const ranks = flipped ? [1,2,3,4,5,6,7,8] : [8,7,6,5,4,3,2,1];
+  const files = flipped ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+  for (const r of ranks){
+    for (const f of files){
+      const el = document.createElement('div');
+      const base = 'sq ' + (((f + r) % 2) ? 'l' : 'd');
+      el.className = base;
+      const sq = FILES[f] + r;
+      el.onclick = () => onSquare(sq);
+      board.appendChild(el);
+      boardCells.push({el, sq, f, r, base});
+    }
+  }
+  boardFlipped = flipped;
+}
+
+function render(){
+  if (!S){ return; }
+  if (!boardCells || boardFlipped !== flipped) buildBoard();
+  const pieces = fenToBoard(S.fen);
+
+  // 选中格出发的合法目标
+  const targets = new Set();
+  const legal = S.legal_moves || [];
+  if (sel) for (const u of legal) if (u.slice(0,2) === sel) targets.add(u.slice(2,4));
+
+  // 被将军的王所在格：仅当引擎 state() 额外提供 in_check 字段时才高亮，
+  // 服务层保证的通用契约里没有这个字段，缺失时不标。
+  let checkSq = null;
+  if (S.in_check){
+    const turn = turnFromFen(S.fen);
+    const kc = turn === 'white' ? 'K' : 'k';
+    for (const [sq,p] of Object.entries(pieces)) if (p === kc) checkSq = sq;
+  }
+
+  for (const {el, sq, f, r, base} of boardCells){
+    let cls = base;
+    if (sq === sel) cls += ' sel';
+    else if (S.last_move && (S.last_move.slice(0,2) === sq || S.last_move.slice(2,4) === sq))
+      cls += ' last';
+    if (sq === checkSq) cls += ' check';
+    el.className = cls;
+
+    el.textContent = '';
+    const p = pieces[sq];
+    if (p){
+      const s = document.createElement('span');
+      s.textContent = GLYPH[p];
+      s.className = (p === p.toUpperCase()) ? 'pw' : 'pb';
+      el.appendChild(s);
+    }
+    if (targets.has(sq)){
+      const d = document.createElement('div');
+      d.className = p ? 'ring' : 'dot';
+      el.appendChild(d);
+    }
+    if (r === (flipped ? 8 : 1)){
+      const c = document.createElement('div'); c.className='coord f'; c.textContent=FILES[f];
+      el.appendChild(c);
+    }
+    if (f === (flipped ? 7 : 0)){
+      const c = document.createElement('div'); c.className='coord r'; c.textContent=r;
+      el.appendChild(c);
+    }
+  }
+  renderPanel();
+}
+
+function renderPanel(){
+  const turn = turnFromFen(S.fen);
+
+  // 着法表：通用契约不保证 san_history，缺失时留占位提示。
+  const mv = $('moves');
+  const sanHistory = sanHistoryFallback();
+  let html = '';
+  sanHistory.forEach((s,i) => {
+    if (i % 2 === 0) html += `<span class="n">${Math.floor(i/2)+1}.</span>`;
+    html += `<span class="m">${esc(s)}</span>`;
+  });
+  mv.innerHTML = html || '<span class="n">（尚无着法记录）</span>';
+  mv.scrollTop = mv.scrollHeight;
+
+  // 评估：通用契约不保证 eval，缺失时隐藏评估条。
+  const e = S.eval;
+  if (e){
+    let w = e.win, d = e.draw, l = e.loss;
+    if (e.pov !== 'white' && !S.engine_white){ const t = w; w = l; l = t; }
+    $('wdlbar').style.display = 'flex';
+    $('wdlnum').style.display = 'flex';
+    $('wdlw').style.width = (w*100)+'%';
+    $('wdld').style.width = (d*100)+'%';
+    $('wdll').style.width = (l*100)+'%';
+    $('wdlnum').innerHTML =
+      `<span>白胜 ${(w*100).toFixed(0)}%</span><span>和 ${(d*100).toFixed(0)}%</span>` +
+      `<span>黑胜 ${(l*100).toFixed(0)}%</span>`;
+    const score = w + d/2;
+    $('evalfill').style.height = (score*100)+'%';
+    $('evaldraw').style.bottom = ((w)*100)+'%';
+    $('evaldraw').style.height = (d*100)+'%';
+  } else {
+    $('wdlbar').style.display='none'; $('wdlnum').style.display='none';
+    $('evalfill').style.height='50%'; $('evaldraw').style.height='0%';
+  }
+
+  const model = $('model-select').value;
+  $('kv').innerHTML =
+    `<span>对弈模型</span><b>${model || '（未选择）'}</b>` +
+    `<span>执子</span><b>${S.engine_white ? '引擎执白' : '引擎执黑'}</b>` +
+    `<span>行棋方</span><b>${turn==='white'?'白':'黑'}</b>` +
+    (sanHistory.length ? `<span>已走</span><b>${sanHistory.length} 半步</b>` : '') +
+    (S.source ? `<span>引擎来源</span><b>${esc(S.source)}</b>` : '') +
+    (S.engine_ms!=null ? `<span>引擎耗时</span><b>${S.engine_ms} ms</b>` : '');
+}
+
+function setStatus(text, cls){
+  const el = $('status');
+  el.textContent = text;
+  el.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+async function api(path, method, body){
+  const r = await fetch(path, {
+    method,
+    headers: {'Content-Type':'application/json'},
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (!r.ok){
+    let msg = r.statusText;
+    try {
+      const d = (await r.json()).detail;
+      if (Array.isArray(d) && d.length){
+        msg = d.map(e => {
+          const loc = (e.loc || []).join('.');
+          return (loc ? loc + ': ' : '') + (e.msg || '');
+        }).join('; ');
+      } else if (d){
+        msg = d;
+      }
+    } catch(e){}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+function afterState(){
+  sel = null;
+  render();
+  if (S.is_game_over){
+    setStatus('对局结束。', 'over');
+  } else {
+    const turn = turnFromFen(S.fen);
+    const mine = (turn === 'white') === !S.engine_white;
+    setStatus(mine ? '轮到你走：点起点，再点终点。' : '引擎思考中…',
+              mine ? '' : 'think');
+  }
+}
+
+function myTurn(){
+  if (!S) return false;
+  const turn = turnFromFen(S.fen);
+  return (turn === 'white') === !S.engine_white;
+}
+
+async function onSquare(sq){
+  if (busy || !S || S.is_game_over) return;
+  if (!myTurn()) return;
+
+  const legal = S.legal_moves || [];
+  if (sel === null){
+    if (legal.some(u => u.slice(0,2) === sq)){ sel = sq; render(); }
+    return;
+  }
+  if (sel === sq){ sel = null; render(); return; }
+
+  // 换选另一个己方棋子
+  const cands = legal.filter(u => u.slice(0,2) === sel && u.slice(2,4) === sq);
+  if (cands.length === 0){
+    if (legal.some(u => u.slice(0,2) === sq)){ sel = sq; render(); }
+    else { sel = null; render(); }
+    return;
+  }
+
+  let uci = cands[0];
+  if (cands.length > 1){          // 升变：让用户选
+    const pick = prompt('升变成什么？q=后 r=车 b=象 n=马', 'q');
+    if (!pick) return;
+    const want = cands.find(u => u.endsWith(pick.toLowerCase()));
+    if (!want){ setStatus('升变选择无效。', 'err'); return; }
+    uci = want;
+  }
+
+  busy = true; sel = null;
+  setStatus('引擎思考中…', 'think');
+  render();
+  try {
+    const resp = await api(`/api/games/${sessionId}/move`, 'POST', {uci});
+    S = resp.state;
+    afterState();
+  } catch(e){
+    setStatus('出错：' + e.message, 'err');
+  } finally { busy = false; }
+}
+
+$('newgame').onclick = async () => {
+  if (busy) return;
+  const model = $('model-select').value;
+  const info = modelsData && modelsData[model];
+  if (!info){ setStatus('暂无可用模型。', 'err'); return; }
+  if (info.status !== 'available'){
+    setStatus(`模型 ${model} 未接入：${info.reason || '暂不可用'}`, 'err');
+    return;
+  }
+  busy = true;
+  setStatus('开局中…', 'think');
+  try {
+    const engineWhite = $('side').value === 'white';
+    const argName = $('preset-select').value || null;
+    flipped = engineWhite;                       // 我执黑时翻转棋盘
+    const resp = await api('/api/new', 'POST', {
+      model_name: model,
+      arg_name: argName,
+      engine_white: engineWhite
+    });
+    sessionId = resp.session_id;
+    S = resp.state;
+    afterState();
+  } catch(e){ setStatus('出错：' + e.message, 'err'); }
+  finally { busy = false; }
+};
+
+$('undo').onclick = async () => {
+  if (!S || !sessionId || busy) return;
+  busy = true;
+  try {
+    const resp = await api(`/api/games/${sessionId}/undo`, 'POST');
+    S = resp.state;
+    afterState();
+  }
+  catch(e){ setStatus('出错：' + e.message, 'err'); }
+  finally { busy = false; }
+};
+
+$('flip').onclick = () => { flipped = !flipped; render(); };
+
+(async () => {
+  try {
+    const resp = await api('/api/models', 'GET');
+    modelsData = resp.models;
+    updateNetInfo();
+  } catch(e){ $('netinfo').textContent = '后端未就绪'; }
+})();
+</script>
+</body>
+</html>

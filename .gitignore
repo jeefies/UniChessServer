@@ -1,0 +1,15 @@
+# 运行时产物
+logs/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# 备份文件
+*.bak
+*.before-*
+*~
+
+# 系统
+.DS_Store
+Thumbs.db
