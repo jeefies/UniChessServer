@@ -944,9 +944,9 @@
       <div class="control-group">
         <label class="control-label">自动对弈步进间隔</label>
         <select id="speed-select">
-          <option value="500">快 (500 ms)</option>
-          <option value="1200" selected>中 (1200 ms)</option>
-          <option value="2500">慢 (2500 ms)</option>
+          <option value="0">极速 (0 s)</option>
+          <option value="1000" selected>标准 (1 s)</option>
+          <option value="3000">慢速 (3 s)</option>
         </select>
       </div>
 
@@ -1028,6 +1028,7 @@ const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp
 let modelsData = null;
 let currentArenaId = null;
 let currentArenaState = null;
+let isAutoPlaying = false;
 let autoPlayTimer = null;
 let isStepping = false;
 
@@ -1429,8 +1430,7 @@ async function loadModels() {
 
 // --- Live Match Control ---
 $('btn-start-match').onclick = async () => {
-  if (autoPlayTimer) clearInterval(autoPlayTimer);
-  autoPlayTimer = null;
+  pauseAutoPlay();
 
   const white_model = $('white-model-select').value;
   const white_arg = $('white-preset-select').value || null;
@@ -1530,15 +1530,18 @@ async function executeStep() {
     }
   } catch (err) {
     // Pause on error
-    if (autoPlayTimer) pauseAutoPlay();
+    if (isAutoPlaying || autoPlayTimer) pauseAutoPlay();
     setStatus('单步执行失败: ' + err.message, 'error');
   } finally {
     isStepping = false;
+    if (isAutoPlaying && !autoPlayTimer && (!currentArenaState || !currentArenaState.is_game_over)) {
+      scheduleNextStep();
+    }
   }
 }
 
 function handleGameOver(state) {
-  if (autoPlayTimer) pauseAutoPlay();
+  pauseAutoPlay();
   $('btn-play-pause').disabled = true;
   $('btn-step').disabled = true;
   $('btn-stop').disabled = true;
@@ -1566,33 +1569,66 @@ function setPlayState(playing) {
     $('play-icon').textContent = '⏸';
     $('play-text').textContent = '暂停对弈';
     $('btn-play-pause').className = 'btn-secondary';
+    $('btn-step').disabled = true;
   } else {
     $('play-icon').textContent = '▶';
     $('play-text').textContent = '自动对弈';
     $('btn-play-pause').className = 'btn-success';
+    if (currentArenaState && !currentArenaState.is_game_over) {
+      $('btn-step').disabled = false;
+    }
   }
 }
 
-function startAutoPlay() {
-  if (autoPlayTimer) clearInterval(autoPlayTimer);
-  const interval = parseInt($('speed-select').value, 10) || 1200;
-  setPlayState(true);
-  executeStep();
-  autoPlayTimer = setInterval(() => {
-    if (!isStepping && currentArenaState && !currentArenaState.is_game_over) {
+function scheduleNextStep() {
+  if (autoPlayTimer) {
+    clearTimeout(autoPlayTimer);
+    autoPlayTimer = null;
+  }
+  if (!isAutoPlaying) return;
+  if (!currentArenaState || currentArenaState.is_game_over) {
+    pauseAutoPlay();
+    return;
+  }
+
+  const intervalVal = parseInt($('speed-select').value, 10);
+  const interval = isNaN(intervalVal) ? 1000 : Math.max(0, intervalVal);
+
+  autoPlayTimer = setTimeout(() => {
+    autoPlayTimer = null;
+    if (isAutoPlaying && !isStepping) {
       executeStep();
     }
   }, interval);
 }
 
+function startAutoPlay() {
+  if (isAutoPlaying) return;
+  if (!currentArenaId || (currentArenaState && currentArenaState.is_game_over)) return;
+
+  if (autoPlayTimer) {
+    clearTimeout(autoPlayTimer);
+    autoPlayTimer = null;
+  }
+  isAutoPlaying = true;
+  setPlayState(true);
+
+  if (!isStepping) {
+    executeStep();
+  }
+}
+
 function pauseAutoPlay() {
-  if (autoPlayTimer) clearInterval(autoPlayTimer);
-  autoPlayTimer = null;
+  isAutoPlaying = false;
+  if (autoPlayTimer) {
+    clearTimeout(autoPlayTimer);
+    autoPlayTimer = null;
+  }
   setPlayState(false);
 }
 
 $('btn-play-pause').onclick = () => {
-  if (autoPlayTimer) {
+  if (isAutoPlaying) {
     pauseAutoPlay();
   } else {
     startAutoPlay();
@@ -1600,9 +1636,12 @@ $('btn-play-pause').onclick = () => {
 };
 
 $('speed-select').onchange = () => {
-  if (autoPlayTimer) {
-    pauseAutoPlay();
-    startAutoPlay();
+  if (isAutoPlaying) {
+    if (autoPlayTimer) {
+      clearTimeout(autoPlayTimer);
+      autoPlayTimer = null;
+      scheduleNextStep();
+    }
   }
 };
 
@@ -1610,7 +1649,7 @@ $('btn-stop').onclick = async () => {
   if (!currentArenaId) return;
   if (!confirm('确定要终止当前竞技场对局吗？')) return;
 
-  if (autoPlayTimer) pauseAutoPlay();
+  pauseAutoPlay();
 
   setStatus('正在终止对局并保存记录...', 'thinking');
   try {
@@ -1628,7 +1667,7 @@ $('btn-stop').onclick = async () => {
 
 // --- Replay Mode ---
 function enterReplayMode(record) {
-  if (autoPlayTimer) pauseAutoPlay();
+  pauseAutoPlay();
 
   replayActive = true;
   replayHistory = parseMovesSequence(record.moves || '');
