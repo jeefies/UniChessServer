@@ -120,15 +120,40 @@ class TestModelRegistrySecurity(ServerTestCase):
     """模型名安全与状态上报。"""
 
     def test_traversal_names_rejected(self):
-        for bad in ['../../tmp/evil', '..', '.', '.hidden', 'a/b', 'resnet/../resnet',
-                    '', 'resnet/', '/etc', '..%2f']:
+        for bad in ['../../tmp/evil', '..', '.', '.hidden', 'a/b', 'T/../T',
+                    '', 'T/', '/etc', '..%2f']:
             with self.subTest(bad=bad), self.assertRaises(model_registry.ModelNotFoundError):
                 model_registry.create_engine(bad)
 
-    def test_valid_name_passes_validation(self):
-        # resnet 是真实存在的占位模型：校验通过、进入 IMPLEMENTED 检查
-        with self.assertRaises(model_registry.ModelNotImplementedError):
-            model_registry.create_engine('resnet')
+    def test_stub_model_status_not_implemented(self):
+        """占位引擎：IMPLEMENTED=False 时状态必须如实报 not_implemented。"""
+        import tempfile
+        link_name = 'test_stub_model'
+        link_path = model_registry.MODELS_DIR / link_name
+        with tempfile.TemporaryDirectory() as td:
+            target = pathlib.Path(td)
+            (target / 'engine.py').write_text(
+                'class GameEngine:\n'
+                '    IMPLEMENTED = False\n'
+                '    NOT_IMPLEMENTED_REASON = "测试占位引擎未接入"\n'
+                '    def __init__(self, **kw): pass\n'
+                '    def setup(self, fen=None): return {}\n'
+                '    def human_move(self, uci): return {}\n'
+                '    def engine_move(self): return {}\n'
+                '    def state(self): return {}\n'
+                '    def undo(self): return {}\n'
+                '    def cleanup(self): pass\n',
+                encoding='utf-8',
+            )
+            link_path.symlink_to(target, target_is_directory=True)
+            try:
+                info = model_registry.describe_model(link_name)
+                self.assertEqual(info['status'], 'not_implemented')
+                self.assertEqual(info['reason'], '测试占位引擎未接入')
+                with self.assertRaises(model_registry.ModelNotImplementedError):
+                    model_registry.create_engine(link_name)
+            finally:
+                link_path.unlink()
 
     def test_symlinked_model_dir_is_allowed(self):
         """运营者创建的符号链接模型目录应可正常加载（集成外部项目的既定方式）。"""
@@ -161,17 +186,8 @@ class TestModelRegistrySecurity(ServerTestCase):
         # 清理后不再列出
         self.assertNotIn(link_name, model_registry.available_models())
 
-    def test_stub_model_status_not_implemented(self):
-        """resnet 仍是占位引擎：状态必须如实报 not_implemented。"""
-        info = model_registry.describe_model('resnet')
-        self.assertEqual(info['status'], 'not_implemented')
-        self.assertTrue(info['reason'])
-
     def test_symlinked_real_engine_is_available(self):
-        """models/T 符号链接（Transformer 项目真实引擎）应可用。
-
-        T 只在配了符号链接的主机上存在；没有则跳过（其它主机只有 resnet）。
-        """
+        """models/T 符号链接（Transformer 项目真实引擎）应可用。"""
         if 'T' not in model_registry.available_models():
             self.skipTest('models/T 符号链接未配置')
         info = model_registry.describe_model('T')
@@ -404,7 +420,6 @@ class TestRoutes(ServerTestCase):
 
     def test_models_lists_real_status(self):
         body = app.list_models()
-        self.assertEqual(body['models']['resnet']['status'], 'not_implemented')
         # T（Transformer 项目符号链接引擎）在本机已配置时必须报 available
         if 'T' in model_registry.available_models():
             self.assertEqual(body['models']['T']['status'], 'available')
@@ -412,13 +427,33 @@ class TestRoutes(ServerTestCase):
         self.assertNotIn('transformer', body['models'])
 
     def test_new_game_stub_returns_501(self):
+        import tempfile
         from fastapi import HTTPException
-        with self.assertRaises(HTTPException) as ctx:
-            app.new_game(app.NewGameRequest(model_name='resnet'))
-        self.assertEqual(ctx.exception.status_code, 501)
-        # 501 文案面向用户，不得泄露内部迁移路线（旧文案含"尚未迁移"）
-        self.assertNotIn('尚未迁移', ctx.exception.detail)
-        self.assertIn('暂不可对局', ctx.exception.detail)
+        link_name = 'test_stub_model_route'
+        link_path = model_registry.MODELS_DIR / link_name
+        with tempfile.TemporaryDirectory() as td:
+            target = pathlib.Path(td)
+            (target / 'engine.py').write_text(
+                'class GameEngine:\n'
+                '    IMPLEMENTED = False\n'
+                '    NOT_IMPLEMENTED_REASON = "测试占位引擎暂不可对局。"\n'
+                '    def __init__(self, **kw): pass\n'
+                '    def setup(self, fen=None): return {}\n'
+                '    def human_move(self, uci): return {}\n'
+                '    def engine_move(self): return {}\n'
+                '    def state(self): return {}\n'
+                '    def undo(self): return {}\n'
+                '    def cleanup(self): pass\n',
+                encoding='utf-8',
+            )
+            link_path.symlink_to(target, target_is_directory=True)
+            try:
+                with self.assertRaises(HTTPException) as ctx:
+                    app.new_game(app.NewGameRequest(model_name=link_name))
+                self.assertEqual(ctx.exception.status_code, 501)
+                self.assertIn('暂不可对局', ctx.exception.detail)
+            finally:
+                link_path.unlink()
 
     def test_new_game_traversal_returns_404(self):
         from fastapi import HTTPException

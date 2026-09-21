@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+data/
 
 # 备份文件
 *.bak

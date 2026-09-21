@@ -10,6 +10,7 @@ GameEngine 类（见 models/__init__.py 顶部注释的契约），即可通过�
   同一局内所有请求都路由到同一个实例，搜索树/cache 可以正确复用推进。
 - 进程内最多同时持有 4 个对局实例（滑动窗口 LRU），超过则强制淘汰最旧
   的一个并调用其 cleanup() 释放资源。
+- 竞技场（Arena）管理双引擎自动对战，最多同时持有 2 个对局实例。
 - 走法合法性判定的权威在服务层（python-chess），不信任模型引擎自行判断。
 - /api/models 如实上报每个引擎的状态（available / not_implemented），
   不把必然返回 501 的占位引擎广告成可用。
@@ -32,6 +33,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import arena_manager as am
+import arena_storage as a_storage
 import models as model_registry
 import session_manager as sm
 
@@ -51,12 +54,18 @@ class MoveRequest(BaseModel):
     uci: str
 
 
+class NewArenaRequest(BaseModel):
+    white_model: str
+    white_arg: str | None = None
+    black_model: str
+    black_arg: str | None = None
+    fen: str | None = None
+
+
 def _session_error_to_http(e: Exception) -> HTTPException:
-    if isinstance(e, sm.SessionNotFoundError):
+    if isinstance(e, (sm.SessionNotFoundError, am.ArenaNotFoundError)):
         return HTTPException(status_code=404, detail=str(e))
-    if isinstance(e, sm.InvalidFenError):
-        return HTTPException(status_code=400, detail=str(e))
-    if isinstance(e, sm.IllegalMoveError):
+    if isinstance(e, (sm.InvalidFenError, sm.IllegalMoveError)):
         return HTTPException(status_code=400, detail=str(e))
     return HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
@@ -145,25 +154,111 @@ def list_games():
     return {"sessions": sm.manager.list_sessions()}
 
 
+# --- Arena 竞技场路由 ---
+
+
+@app.get("/arena")
+def arena_page():
+    arena_html = STATIC_DIR / "arena.html"
+    if not arena_html.is_file():
+        raise HTTPException(status_code=404, detail="Arena page not found")
+    return FileResponse(str(arena_html))
+
+
+@app.post("/api/arena/new")
+def new_arena(req: NewArenaRequest):
+    try:
+        session = am.manager.create(
+            white_model=req.white_model,
+            white_arg=req.white_arg,
+            black_model=req.black_model,
+            black_arg=req.black_arg,
+            fen=req.fen,
+        )
+    except model_registry.ModelNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except (model_registry.ModelNotImplementedError, NotImplementedError) as e:
+        raise HTTPException(status_code=501, detail=str(e) or "引擎尚未接入，暂不可对局。")
+    except model_registry.ArgPresetNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (sm.SessionError, am.ArenaError) as e:
+        raise _session_error_to_http(e)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+    return {"arena_id": session.arena_id, "state": session.state()}
+
+
+@app.post("/api/arena/games/{arena_id}/step")
+def arena_step(arena_id: str):
+    try:
+        session = am.manager.get(arena_id)
+        step_result = session.step()
+    except (sm.SessionError, am.ArenaError) as e:
+        raise _session_error_to_http(e)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+    return {"arena_id": arena_id, "step": step_result, "state": session.state()}
+
+
+@app.get("/api/arena/games/{arena_id}/state")
+def arena_state(arena_id: str):
+    try:
+        session = am.manager.get(arena_id)
+        state = session.state()
+    except (sm.SessionError, am.ArenaError) as e:
+        raise _session_error_to_http(e)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+    return {"arena_id": arena_id, "state": state}
+
+
+@app.delete("/api/arena/games/{arena_id}")
+def close_arena(arena_id: str):
+    try:
+        am.manager.close(arena_id)
+    except (sm.SessionError, am.ArenaError) as e:
+        raise _session_error_to_http(e)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+    return {"arena_id": arena_id, "closed": True}
+
+
+@app.get("/api/arena/records")
+def list_arena_records(limit: int = 50, offset: int = 0):
+    try:
+        records = a_storage.storage.list_records(limit=limit, offset=offset)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+    return {"records": records, "limit": limit, "offset": offset}
+
+
+@app.get("/api/arena/records/{record_id}")
+def get_arena_record(record_id: str):
+    try:
+        record = a_storage.storage.get_record(record_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+    if record is None:
+        raise HTTPException(status_code=404, detail=f'对弈记录 "{record_id}" 未找到')
+    return {"record": record}
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "models": model_registry.available_models()}
 
 
 # 静态前端（对局页），迁移自旧 unichess-server。
-# 注意：旧的 /board 与 /status 训练看板页面依赖的 /api/board、/api/status*
-# 端点在本服务中不存在，页面已归档（不再服务），路由一并移除——
-# 继续服务一个数据端点全部 404 的死页面，只会得到"刷新失败"的空白看板。
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     @app.middleware("http")
     async def _static_backup_guard(request: Request, call_next):
-        """拦截 /static 下的备份/点文件：.bak、.before-*、.*、*~。
-
-        StaticFiles 会服务目录内一切文件，历史备份（如
-        board.html.bak-rebuild-20260917）等于公开旧版前端源码。
-        """
+        """拦截 /static 下的备份/点文件：.bak、.before-*、.*、*~。"""
         path = request.url.path
         if path.startswith("/static/"):
             name = path[len("/static/"):].rsplit("/", 1)[-1]

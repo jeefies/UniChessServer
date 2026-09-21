@@ -77,14 +77,14 @@ python app.py --host 127.0.0.1 --port 8000
 
 | 模型名 | 实现 | 状态 |
 |---|---|---|
-| `T` | 符号链接 → `/home/jeefy/UniChess/Transformer/engine.py`（Transformer 项目真实引擎，跨会话共享权重单例） | available，预设 `max_mcts` |
-| `resnet` | `models/resnet/engine.py` 占位桩 | not_implemented，等待 ResNet 项目接入 |
+| `T` | 符号链接 → `/home/jeefy/UniChess/Transformer`（Transformer 项目真实引擎，跨会话共享权重单例） | available，预设 `max_mcts` |
+| `R` | 符号链接 → `/home/jeefy/UniChess/ResNet`（ResNet 项目引擎） | available，预设 `policy`, `fast`, `max_mcts`, `cpu` |
 
-命名约定：模型名保持简短（`T` 而非 `transformer`），避免冗长；接入新项目时用符号链接 + 简短名，例如 `ln -s /home/jeefy/UniChess/ResNet models/R`。曾经的 `models/transformer/` 占位桩已被 `T` 取代并删除（备份见 `~/UniChess/_legacy_server_20260920/placeholder_transformer_20260920/`）。
+命名约定：模型名保持简短（`T` 而非 `transformer`，`R` 而非 `resnet`），避免冗长；接入新项目时用符号链接 + 简短名，例如 `ln -s /home/jeefy/UniChess/ResNet models/R`。旧有的占位桩目录（`models/transformer/`、`models/resnet/`）已被对应的符号链接取代并清理。
 
 ## 当前状态
 
-`T` 已可对局（Transformer 20M + 开局库/表库/MCTS 800）。`resnet` 仍为占位（`IMPLEMENTED=False`）：`/api/models` 报告 `not_implemented`，`/api/new` 返回 501「暂不可对局」。
+`T` 与 `R` 均已接入并可对局（API 报告 `available`）。
 
 ## 已归档内容（2026-09-20 审查后移除，勿再 Serve）
 
