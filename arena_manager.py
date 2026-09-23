@@ -49,7 +49,10 @@ class ArenaSession:
     board: chess.Board = field(default_factory=chess.Board)
     created_at: str = field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat())
     is_cleaned: bool = False
+    batch_id: str | None = None
+    san_history: list[str] = field(default_factory=list)
     _op_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    storage: arena_storage.ArenaStorage | None = None
 
     def setup(self, fen: str | None = None) -> None:
         with self._op_lock:
@@ -64,6 +67,7 @@ class ArenaSession:
             fen_str = self.board.fen()
             self.white_engine.setup(fen_str)
             self.black_engine.setup(fen_str)
+            self.san_history = []
 
     def step(self) -> dict[str, Any]:
         """执行单步对弈。
@@ -101,6 +105,7 @@ class ArenaSession:
 
             san = self.board.san(move)
             self.board.push(move)
+            self.san_history.append(san)
 
             # 同步给对手引擎
             try:
@@ -108,6 +113,7 @@ class ArenaSession:
             except Exception as e:
                 # 引擎同步失败时回滚服务层 board
                 self.board.pop()
+                self.san_history.pop()
                 logger.exception("对手引擎 human_move 同步失败: %s", uci)
                 raise ArenaError(f"对手引擎同步走法失败: {e}") from e
 
@@ -122,10 +128,14 @@ class ArenaSession:
                 "is_game_over": is_over,
                 "result": result,
                 "winner": winner,
+                "termination_reason": termination_reason,
                 "ply_count": len(self.board.move_stack),
                 "engine_ms": engine_ms,
                 "eval": move_res.get("eval") if isinstance(move_res, dict) else None,
                 "engine_details": {k: v for k, v in move_res.items() if k not in ("engine_move", "fen")} if isinstance(move_res, dict) else {},
+                "last_move": uci,
+                "in_check": self.board.is_check(),
+                "san_history": list(self.san_history),
             }
 
             if is_over:
@@ -153,6 +163,10 @@ class ArenaSession:
                 "termination_reason": termination_reason,
                 "ply_count": len(self.board.move_stack),
                 "moves": " ".join([m.uci() for m in self.board.move_stack]),
+                "batch_id": self.batch_id,
+                "last_move": self.board.move_stack[-1].uci() if self.board.move_stack else None,
+                "in_check": self.board.is_check(),
+                "san_history": list(self.san_history),
             }
 
     def _evaluate_outcome(self) -> tuple[str, str | None, str | None]:
@@ -206,21 +220,36 @@ class ArenaSession:
                 "result": result,
                 "winner": winner,
                 "termination_reason": termination_reason,
+                "batch_id": self.batch_id,
             }
-            arena_storage.storage.save_record(record)
+            target_storage = self.storage or arena_storage.storage
+            target_storage.save_record(record)
         except Exception:
             logger.exception("保存竞技场记录到数据库失败 (arena_id=%s)", self.arena_id)
 
-    def cleanup(self) -> None:
+    def cleanup(self, save_stopped: bool = True) -> None:
         with self._op_lock:
             if self.is_cleaned:
                 return
             self.is_cleaned = True
 
             # 若尚未对局结束，由外部或LRU淘汰/关闭，标记为 stopped 存库
-            if not self.board.is_game_over():
+            if save_stopped and not self.board.is_game_over():
                 self._save_record_to_db(result="*", winner="stopped", termination_reason="stopped")
 
+            for role, eng in (("white", self.white_engine), ("black", self.black_engine)):
+                try:
+                    eng.cleanup()
+                except Exception:
+                    logger.exception("竞技场清理 %s 引擎失败", role)
+
+    def finish_as_draw(self, reason: str) -> None:
+        """以和棋收束当前对局（步数上限等情形），保存记录并释放引擎。"""
+        with self._op_lock:
+            if self.is_cleaned:
+                return
+            self._save_record_to_db(result="1/2-1/2", winner="draw", termination_reason=reason)
+            self.is_cleaned = True
             for role, eng in (("white", self.white_engine), ("black", self.black_engine)):
                 try:
                     eng.cleanup()
@@ -266,6 +295,7 @@ class ArenaManager:
                 black_arg=black_arg,
                 white_engine=white_engine,
                 black_engine=black_engine,
+                storage=self._storage,
             )
 
             try:

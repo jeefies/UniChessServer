@@ -702,6 +702,7 @@
   .badge-black-win { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4); }
   .badge-draw { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.4); }
   .badge-stopped { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
+  .badge-batch { background: rgba(77, 159, 255, 0.15); color: var(--accent); border: 1px solid rgba(77,159,255,0.4); border-radius: 4px; padding: 1px 6px; font-size: 10px; margin-left: 4px; }
 
   .empty-records {
     text-align: center;
@@ -813,6 +814,7 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
         人机对弈模式
       </a>
+      <a href="/arena/batch" class="nav-link" title="批量对弈">⚡ 批量对弈</a>
       <div class="badge-models" id="netinfo">
         <span class="badge-dot" id="netinfo-dot"></span>
         <span id="netinfo-text">服务连接中...</span>
@@ -990,10 +992,16 @@
       <div class="records-title">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
         历史对战记录 (Arena Records)
+        <span style="font-size:12px;color:var(--text-dim)">（批量对弈记录显示 <span class="badge-batch" style="font-size:10px">Batch</span> 标记）</span>
       </div>
-      <button class="btn-secondary" id="btn-refresh-records" style="font-size:12px;padding:5px 10px;">
-        刷新列表
-      </button>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <select id="batch-filter" style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
+          <option value="">全部对局</option>
+          <option value="manual">仅手动对弈</option>
+          <option value="batch">仅批量对弈</option>
+        </select>
+        <button class="btn-secondary" id="btn-refresh-records" style="font-size:12px;padding:5px 10px;">刷新列表</button>
+      </div>
     </div>
     <div class="table-responsive">
       <table class="records-table">
@@ -1686,7 +1694,12 @@ function enterReplayMode(record) {
   $('card-white-arg').textContent = record.white_arg ? `preset: ${record.white_arg}` : 'default';
   $('card-black-name').textContent = record.black_model;
   $('card-black-arg').textContent = record.black_arg ? `preset: ${record.black_arg}` : 'default';
-  $('card-white-stats').textContent = `对局结果: ${record.result}`;
+  let resultText = record.result || '*';
+  if (record.winner === 'white') resultText = (record.white_model || '白方') + ' 胜';
+  else if (record.winner === 'black') resultText = (record.black_model || '黑方') + ' 胜';
+  else if (record.winner === 'draw') resultText = '和棋';
+  else if (record.winner === 'stopped') resultText = '已终止';
+  $('card-white-stats').textContent = `对局结果: ${resultText}`;
   $('card-black-stats').textContent = `共 ${record.ply_count} 步`;
 
   $('card-white').classList.remove('active-turn');
@@ -1775,7 +1788,11 @@ $('btn-rep-exit').onclick = exitReplayMode;
 async function loadRecords() {
   const tbody = $('records-tbody');
   try {
-    const res = await api('/api/arena/records?limit=50&offset=0');
+    const filter = $('batch-filter').value;
+    let url = '/api/arena/records?limit=50&offset=0';
+    if (filter === 'batch') url += '&batch_id=__batch__';
+    else if (filter === 'manual') url += '&batch_id=';
+    const res = await api(url, 'GET');
     cachedRecords = res.records || [];
 
     if (cachedRecords.length === 0) {
@@ -1797,29 +1814,32 @@ async function loadRecords() {
 
       let badgeCls = 'badge-stopped';
       let resultLabel = rec.result || '*';
-      if (rec.winner === 'white' || rec.result === '1-0') {
+      if (rec.winner === 'white') {
         badgeCls = 'badge-white-win';
-        resultLabel = '1-0 (白胜)';
-      } else if (rec.winner === 'black' || rec.result === '0-1') {
+        resultLabel = (rec.white_model || '白方') + ' 胜';
+      } else if (rec.winner === 'black') {
         badgeCls = 'badge-black-win';
-        resultLabel = '0-1 (黑胜)';
-      } else if (rec.winner === 'draw' || rec.result === '1/2-1/2') {
+        resultLabel = (rec.black_model || '黑方') + ' 胜';
+      } else if (rec.winner === 'draw') {
         badgeCls = 'badge-draw';
-        resultLabel = '1/2-1/2 (和局)';
+        resultLabel = '和棋';
+      } else if (rec.winner === 'stopped') {
+        resultLabel = '已终止';
       } else {
-        resultLabel = rec.winner === 'stopped' ? '已终止' : '*';
+        resultLabel = rec.result || '*';
       }
 
       const wArg = rec.white_arg ? ` (${esc(rec.white_arg)})` : '';
       const bArg = rec.black_arg ? ` (${esc(rec.black_arg)})` : '';
       const reason = esc(rec.termination_reason || '-');
+      const batchBadge = rec.batch_id ? '<span class="badge-batch">Batch</span>' : '';
 
       rowsHtml += `
         <tr>
           <td><span style="font-family:monospace;font-size:12px;color:var(--text-secondary);">${esc(timeStr)}</span></td>
           <td><strong>${esc(rec.white_model)}</strong>${wArg}</td>
           <td><strong>${esc(rec.black_model)}</strong>${bArg}</td>
-          <td><span class="badge-result ${badgeCls}">${esc(resultLabel)}</span></td>
+          <td><span class="badge-result ${badgeCls}">${esc(resultLabel)}</span>${batchBadge}</td>
           <td>${rec.ply_count || 0}</td>
           <td><span style="color:var(--text-muted);font-size:12px;">${reason}</span></td>
           <td>
@@ -1849,6 +1869,7 @@ async function loadRecords() {
 }
 
 $('btn-refresh-records').onclick = loadRecords;
+$('batch-filter').onchange = loadRecords;
 
 // --- Initialize Page ---
 window.addEventListener('DOMContentLoaded', () => {

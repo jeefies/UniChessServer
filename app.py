@@ -35,6 +35,7 @@ from pydantic import BaseModel
 
 import arena_manager as am
 import arena_storage as a_storage
+import batch_runner as batch_mod
 import models as model_registry
 import session_manager as sm
 
@@ -60,6 +61,15 @@ class NewArenaRequest(BaseModel):
     black_model: str
     black_arg: str | None = None
     fen: str | None = None
+
+
+class BatchStartRequest(BaseModel):
+    white_model: str
+    white_arg: str | None = None
+    black_model: str
+    black_arg: str | None = None
+    rounds: int = 8
+    max_plies: int = 400
 
 
 def _session_error_to_http(e: Exception) -> HTTPException:
@@ -228,12 +238,12 @@ def close_arena(arena_id: str):
 
 
 @app.get("/api/arena/records")
-def list_arena_records(limit: int = 50, offset: int = 0):
+def list_arena_records(limit: int = 50, offset: int = 0, batch_id: str | None = None):
     try:
-        records = a_storage.storage.list_records(limit=limit, offset=offset)
+        records = a_storage.storage.list_records(limit=limit, offset=offset, batch_id=batch_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
-    return {"records": records, "limit": limit, "offset": offset}
+    return {"records": records, "limit": limit, "offset": offset, "batch_id": batch_id}
 
 
 @app.get("/api/arena/records/{record_id}")
@@ -245,6 +255,51 @@ def get_arena_record(record_id: str):
     if record is None:
         raise HTTPException(status_code=404, detail=f'对弈记录 "{record_id}" 未找到')
     return {"record": record}
+
+
+# --- 批量对弈路由 ---
+
+@app.get("/arena/batch")
+def batch_page():
+    batch_html = STATIC_DIR / "arena_batch.html"
+    if not batch_html.is_file():
+        raise HTTPException(status_code=404, detail="Batch page not found")
+    return FileResponse(str(batch_html))
+
+
+@app.post("/api/arena/batch/start")
+def start_batch(req: BatchStartRequest):
+    try:
+        runner = batch_mod.BatchRunner.get()
+        config = batch_mod.BatchConfig(
+            white_model=req.white_model,
+            white_arg=req.white_arg,
+            black_model=req.black_model,
+            black_arg=req.black_arg,
+            rounds=max(1, req.rounds),
+            max_plies=max(1, req.max_plies),
+        )
+        snapshot = runner.start(config)
+    except batch_mod.BatchAlreadyRunningError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except model_registry.ModelNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except (model_registry.ModelNotImplementedError, NotImplementedError) as e:
+        raise HTTPException(status_code=501, detail=str(e) or "引擎尚未接入，暂不可对局。")
+    except model_registry.ArgPresetNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+    return snapshot
+
+
+@app.get("/api/arena/batch/state")
+def batch_state():
+    try:
+        runner = batch_mod.BatchRunner.get()
+        return runner.snapshot()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
 @app.get("/api/health")

@@ -1,6 +1,7 @@
 """竞技场历史对弈持久化存储（SQLite 实现）。"""
 from __future__ import annotations
 
+import datetime
 import json
 import sqlite3
 import threading
@@ -41,12 +42,44 @@ class ArenaStorage:
                             ply_count INTEGER DEFAULT 0,
                             result TEXT,
                             winner TEXT,
-                            termination_reason TEXT
+                            termination_reason TEXT,
+                            batch_id TEXT
                         )
                         """
                     )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS arena_batches (
+                            id TEXT PRIMARY KEY,
+                            created_at TEXT NOT NULL,
+                            end_time TEXT,
+                            white_model TEXT NOT NULL,
+                            white_arg TEXT,
+                            black_model TEXT NOT NULL,
+                            black_arg TEXT,
+                            rounds_planned INTEGER NOT NULL,
+                            rounds_completed INTEGER DEFAULT 0,
+                            status TEXT NOT NULL,
+                            tally_json TEXT DEFAULT '{}',
+                            error TEXT
+                        )
+                        """
+                    )
+                    self._migrate(conn)
             finally:
                 conn.close()
+
+    def _migrate(self, conn) -> None:
+        """兼容旧库：为已有 arena_records 补加 batch_id 列。"""
+        try:
+            cols = {r['name'] for r in conn.execute("PRAGMA table_info(arena_records)").fetchall()}
+        except Exception:
+            return
+        if 'batch_id' not in cols:
+            try:
+                conn.execute("ALTER TABLE arena_records ADD COLUMN batch_id TEXT")
+            except Exception:
+                pass
 
     def save_record(self, record: dict[str, Any]) -> None:
         """保存或更新对弈记录。"""
@@ -63,11 +96,13 @@ class ArenaStorage:
                         INSERT INTO arena_records (
                             id, created_at, end_time,
                             white_model, white_arg, black_model, black_arg,
-                            moves, ply_count, result, winner, termination_reason
+                            moves, ply_count, result, winner, termination_reason,
+                            batch_id
                         ) VALUES (
                             :id, :created_at, :end_time,
                             :white_model, :white_arg, :black_model, :black_arg,
-                            :moves, :ply_count, :result, :winner, :termination_reason
+                            :moves, :ply_count, :result, :winner, :termination_reason,
+                            :batch_id
                         )
                         ON CONFLICT(id) DO UPDATE SET
                             end_time = excluded.end_time,
@@ -79,7 +114,8 @@ class ArenaStorage:
                             ply_count = excluded.ply_count,
                             result = excluded.result,
                             winner = excluded.winner,
-                            termination_reason = excluded.termination_reason
+                            termination_reason = excluded.termination_reason,
+                            batch_id = excluded.batch_id
                         """,
                         {
                             "id": record["id"],
@@ -94,28 +130,32 @@ class ArenaStorage:
                             "result": record.get("result", "*"),
                             "winner": record.get("winner"),
                             "termination_reason": record.get("termination_reason"),
+                            "batch_id": record.get("batch_id"),
                         },
                     )
             finally:
                 conn.close()
 
-    def list_records(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        """获取对弈记录列表，按创建时间倒序返回。"""
+    def list_records(self, limit: int = 50, offset: int = 0, batch_id: str | None = None) -> list[dict[str, Any]]:
+        """获取对弈记录列表，按创建时间倒序返回。batch_id 为 None 时不过滤。"""
         with self._lock:
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute(
-                    """
+                sql = """
                     SELECT id, created_at, end_time,
                            white_model, white_arg, black_model, black_arg,
-                           moves, ply_count, result, winner, termination_reason
+                           moves, ply_count, result, winner, termination_reason,
+                           batch_id
                     FROM arena_records
-                    ORDER BY created_at DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    (limit, offset),
-                )
+                """
+                params: list[Any] = []
+                if batch_id is not None:
+                    sql += " WHERE batch_id = ?"
+                    params.append(batch_id)
+                sql += " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+                cursor.execute(sql, params)
                 rows = cursor.fetchall()
                 return [dict(row) for row in rows]
             finally:
@@ -131,7 +171,151 @@ class ArenaStorage:
                     """
                     SELECT id, created_at, end_time,
                            white_model, white_arg, black_model, black_arg,
-                           moves, ply_count, result, winner, termination_reason
+                           moves, ply_count, result, winner, termination_reason,
+                           batch_id
+                    FROM arena_records
+                    WHERE id = ?
+                    """,
+                    (record_id,),
+                )
+                row = cursor.fetchone()
+                return dict(row) if row else None
+            finally:
+                conn.close()
+
+    # ---------- 批量对弈持久化 ----------
+
+    def save_batch(self, batch: dict[str, Any]) -> None:
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO arena_batches (
+                            id, created_at, end_time,
+                            white_model, white_arg, black_model, black_arg,
+                            rounds_planned, rounds_completed, status, tally_json, error
+                        ) VALUES (
+                            :id, :created_at, :end_time,
+                            :white_model, :white_arg, :black_model, :black_arg,
+                            :rounds_planned, :rounds_completed, :status, :tally_json, :error
+                        )
+                        ON CONFLICT(id) DO UPDATE SET
+                            end_time = excluded.end_time,
+                            rounds_completed = excluded.rounds_completed,
+                            status = excluded.status,
+                            tally_json = excluded.tally_json,
+                            error = excluded.error
+                        """,
+                        {
+                            "id": batch["id"],
+                            "created_at": batch.get("created_at"),
+                            "end_time": batch.get("end_time"),
+                            "white_model": batch.get("white_model", ""),
+                            "white_arg": batch.get("white_arg"),
+                            "black_model": batch.get("black_model", ""),
+                            "black_arg": batch.get("black_arg"),
+                            "rounds_planned": batch.get("rounds_planned", 0),
+                            "rounds_completed": batch.get("rounds_completed", 0),
+                            "status": batch.get("status", "running"),
+                            "tally_json": json.dumps(batch.get("tally", {}), ensure_ascii=False),
+                            "error": batch.get("error"),
+                        },
+                    )
+            finally:
+                conn.close()
+
+    def get_batch(self, batch_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM arena_batches WHERE id = ?", (batch_id,))
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                result = dict(row)
+                result["tally"] = json.loads(result.pop("tally_json") or "{}")
+                return result
+            finally:
+                conn.close()
+
+    def list_batches(self, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, created_at, end_time,
+                           white_model, white_arg, black_model, black_arg,
+                           rounds_planned, rounds_completed, status, tally_json, error
+                    FROM arena_batches
+                    ORDER BY created_at DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (limit, offset),
+                )
+                rows = cursor.fetchall()
+                results = []
+                for row in rows:
+                    item = dict(row)
+                    item["tally"] = json.loads(item.pop("tally_json") or "{}")
+                    results.append(item)
+                return results
+            finally:
+                conn.close()
+
+    def mark_stale_running_batches(self) -> None:
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    conn.execute(
+                        "UPDATE arena_batches SET status = 'interrupted', end_time = COALESCE(end_time, :now) WHERE status = 'running'",
+                        {"now": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+                    )
+            finally:
+                conn.close()
+
+    def list_records(self, limit: int = 50, offset: int = 0, batch_id: str | None = None) -> list[dict[str, Any]]:
+        """获取对弈记录列表，按创建时间倒序返回。batch_id 为 None 时不过滤。"""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                sql = """
+                    SELECT id, created_at, end_time,
+                           white_model, white_arg, black_model, black_arg,
+                           moves, ply_count, result, winner, termination_reason,
+                           batch_id
+                    FROM arena_records
+                """
+                params: list[Any] = []
+                if batch_id is not None:
+                    sql += " WHERE batch_id = ?"
+                    params.append(batch_id)
+                sql += " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+                cursor.execute(sql, params)
+                rows = cursor.fetchall()
+                return [dict(row) for row in rows]
+            finally:
+                conn.close()
+
+    def get_record(self, record_id: str) -> dict[str, Any] | None:
+        """根据 id 查询单条记录。"""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, created_at, end_time,
+                           white_model, white_arg, black_model, black_arg,
+                           moves, ply_count, result, winner, termination_reason,
+                           batch_id
                     FROM arena_records
                     WHERE id = ?
                     """,

@@ -181,6 +181,8 @@
   }
 
   .sq {
+    width: var(--sq-size);
+    height: var(--sq-size);
     position: relative;
     display: flex;
     align-items: center;
@@ -740,7 +742,7 @@
 
 <script>
 const FILES = 'abcdefgh';
-let S = null;          // 后端返回的状态
+let S = { fen: '8/8/8/8/8/8/8/8 w - - 0 1', legal_moves: [], is_game_over: false, engine_white: true, in_check: false, last_move: null, eval: null, san_history: [], source: null, engine_ms: null };
 let sel = null;        // 已选中的起点格
 let flipped = false;   // 棋盘是否翻转
 let busy = false;
@@ -1199,6 +1201,7 @@ $('flip').onclick = () => {
     setStatus('连接对弈服务失败，请检查服务状态', 'error');
   }
 })();
+render();
 </script>
 </body>
 </html>
