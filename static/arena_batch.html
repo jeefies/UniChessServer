@@ -108,14 +108,15 @@
     <div class="control-group"><label>模型 B</label><select id="black-model"></select></div>
     <div class="control-group"><label>模型 B 参数</label><select id="black-arg"></select></div>
     <div class="control-group"><label>轮数</label><input id="rounds" type="number" value="8" min="2" max="200" step="2"></div>
-    <div class="control-group"><label>单局步数上限</label><input id="max-plies" type="number" value="400" min="50" max="2000"></div>
+    <div class="control-group"><label>管理员口令</label><input id="admin-token" type="password" autocomplete="off" placeholder="X-Admin-Token"></div>
+    <div class="control-group"><label>单局步数上限</label><input id="max-plies" type="number" value="400" min="50" max="1000"></div>
     <button class="btn-primary" id="btn-start">▶ 开始批量对弈</button>
   </div>
 
   <div class="batch-summary" id="batch-summary" style="display:none">
     <span class="summary-pill pill-idle" id="batch-status">空闲</span>
     <span id="batch-progress">0 / 0</span>
-    <span id="batch-tally">白胜 0 · 黑胜 0 · 和棋 0</span>
+    <span id="batch-tally">A 胜 0 · B 胜 0 · 和棋 0</span>
   </div>
 
   <div class="batch-grid" id="batch-grid"></div>
@@ -136,6 +137,7 @@ const $ = id => document.getElementById(id);
 const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let modelsData = null;
 let currentBatchId = null;
+let batchRunning = false;
 let pollTimer = null;
 
 const PIECE_DEFS = `
@@ -210,8 +212,8 @@ function renderBoardInto(container, fen, lastMoveUci, inCheck) {
   }
 }
 
-async function api(path, method, body) {
-  const opts = { method, headers: {'Content-Type': 'application/json'}, body: body ? JSON.stringify(body) : undefined };
+async function api(path, method, body, extraHeaders) {
+  const opts = { method, headers: Object.assign({'Content-Type': 'application/json'}, extraHeaders || {}), body: body ? JSON.stringify(body) : undefined };
   const r = await fetch(path, opts);
   if (!r.ok) {
     let msg = r.statusText;
@@ -253,7 +255,7 @@ async function loadModels() {
 }
 
 async function startBatch() {
-  if (currentBatchId) { alert('批量对弈已在运行中，页面将自动追踪。'); return; }
+  if (batchRunning) { alert('批量对弈已在运行中，页面将自动追踪。'); return; }
   const rounds = parseInt($('rounds').value || '8', 10);
   if (rounds % 2 !== 0) { alert('轮数必须为偶数'); return; }
   const body = {
@@ -263,8 +265,11 @@ async function startBatch() {
   };
   if (!body.white_model || !body.black_model) { alert('请选择白方与黑方模型'); return; }
   try {
-    const snap = await api('/api/arena/batch/start', 'POST', body);
+    const token = $('admin-token').value.trim();
+    try { if (token) sessionStorage.setItem('unichess-admin-token', token); } catch(e) {}
+    const snap = await api('/api/arena/batch/start', 'POST', body, token ? {'X-Admin-Token': token} : undefined);
     currentBatchId = snap.batch && snap.batch.id;
+    batchRunning = !!snap.is_running;
     $('btn-start').disabled = true;
     if (!pollTimer) pollState();
   } catch(e) { alert('启动失败：' + e.message); }
@@ -276,13 +281,17 @@ function renderSummary(batch) {
   const statusEl = $('batch-status');
   const progressEl = $('batch-progress');
   const tallyEl = $('batch-tally');
-  if (!batch) { statusEl.textContent = '空闲'; statusEl.className = 'summary-pill pill-idle'; progressEl.textContent = '0 / 0'; tallyEl.textContent = '白胜 0 · 黑胜 0 · 和棋 0'; return; }
+  if (!batch) { statusEl.textContent = '空闲'; statusEl.className = 'summary-pill pill-idle'; progressEl.textContent = '0 / 0'; tallyEl.textContent = 'A 胜 0 · B 胜 0 · 和棋 0'; return; }
   const s = batch.status;
-  statusEl.textContent = s === 'running' ? '对弈中' : s === 'completed' ? '已完成' : s === 'error' ? '异常' : s;
+  const STATUS_TEXT = { running: '对弈中', completed: '已完成', error: '异常', stopped: '已停止', interrupted: '已中断（服务重启）' };
+  statusEl.textContent = STATUS_TEXT[s] || s;
   statusEl.className = 'summary-pill ' + (s === 'running' ? 'pill-running' : s === 'completed' ? 'pill-completed' : s === 'error' ? 'pill-error' : 'pill-idle');
   progressEl.textContent = `${batch.rounds_completed} / ${batch.rounds_planned}`;
   const t = batch.tally || {};
-  tallyEl.textContent = `白胜 ${t.white||0} · 黑胜 ${t.black||0} · 和棋 ${t.draw||0}`;
+  const aName = batch.white_model + (batch.white_arg ? `(${batch.white_arg})` : "");
+  const bName = batch.black_model + (batch.black_arg ? `(${batch.black_arg})` : "");
+  tallyEl.textContent = `A ${aName} 胜 ${t.a_win||0} · B ${bName} 胜 ${t.b_win||0} · 和棋 ${t.draw||0}`;
+  if (batch.error) tallyEl.textContent += ` · 错误：${batch.error}`;
 }
 
 function renderWorkers(workers) {
@@ -322,8 +331,8 @@ async function pollState() {
     const snap = await api('/api/arena/batch/state', 'GET');
     const batch = snap.batch;
     if (batch && batch.id && batch.id !== currentBatchId) currentBatchId = batch.id;
-    if (batch && batch.status === 'completed') { $('btn-start').disabled = false; }
-    if (batch && batch.status === 'error') { $('btn-start').disabled = false; }
+    batchRunning = !!snap.is_running;
+    $('btn-start').disabled = batchRunning;
     renderSummary(batch);
     renderWorkers(snap.workers || []);
     await renderBatchRecords();
@@ -359,6 +368,7 @@ async function renderBatchRecords() {
 $('btn-start').onclick = startBatch;
 window.addEventListener('DOMContentLoaded', () => {
   document.body.insertAdjacentHTML('afterbegin', PIECE_DEFS);
+  try { const t = sessionStorage.getItem('unichess-admin-token'); if (t) $('admin-token').value = t; } catch(e) {}
   loadModels();
   pollState();
 });

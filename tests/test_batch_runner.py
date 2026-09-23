@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pathlib
+import random
 import sys
 import tempfile
 import threading
@@ -49,6 +50,23 @@ class FakeBatchEngine:
         self.cleaned += 1
 
 
+class BlockingEngine(FakeBatchEngine):
+    """engine_move 阻塞到 release 置位，用来让批次保持运行态。"""
+
+    def __init__(self, release, **kwargs):
+        super().__init__(**kwargs)
+        self.release = release
+
+    def engine_move(self):
+        self.release.wait(timeout=30)
+        return super().engine_move()
+
+
+class FailingEngine(FakeBatchEngine):
+    def engine_move(self):
+        raise RuntimeError("boom")
+
+
 def _make_runner(storage):
     batch_mod.BatchRunner.reset()
     return batch_mod.BatchRunner.get(storage=storage)
@@ -71,6 +89,7 @@ class TestBatchRunner(unittest.TestCase):
             black_model=kw.pop('black_model', 'B'),
             rounds=rounds,
             max_plies=max_plies,
+            min_free_gpu_mib=kw.pop('min_free_gpu_mib', 0),
             **kw,
         )
         return self.runner.start(cfg)
@@ -93,10 +112,15 @@ class TestBatchRunner(unittest.TestCase):
         self.assertEqual(len(snap['workers']), batch_mod.BATCH_WORKERS)
 
     def test_double_start_raises(self):
-        with mock.patch.object(model_registry, 'create_engine', side_effect=lambda n, a: FakeBatchEngine()):
+        release = threading.Event()
+        with mock.patch.object(model_registry, 'create_engine',
+                               side_effect=lambda n, a: BlockingEngine(release)):
             self._start(rounds=2)
-        with self.assertRaises(batch_mod.BatchAlreadyRunningError):
-            self._start(rounds=2)
+            try:
+                with self.assertRaises(batch_mod.BatchAlreadyRunningError):
+                    self._start(rounds=2)
+            finally:
+                release.set()
 
     def test_rounds_complete_and_tally(self):
         with mock.patch.object(model_registry, 'create_engine', side_effect=lambda n, a: FakeBatchEngine()):
@@ -104,7 +128,9 @@ class TestBatchRunner(unittest.TestCase):
             snap = self._wait_done(timeout=60)
         self.assertEqual(snap['batch']['status'], 'completed')
         self.assertEqual(snap['batch']['rounds_completed'], 4)
-        total = (snap['batch']['tally'] or {}).get('white', 0) + (snap['batch']['tally'] or {}).get('black', 0) + (snap['batch']['tally'] or {}).get('draw', 0)
+        tally = snap['batch']['tally']
+        self.assertEqual(set(tally), {'a_win', 'b_win', 'draw'})
+        total = tally['a_win'] + tally['b_win'] + tally['draw']
         self.assertEqual(total, 4)
 
     def test_color_alternation(self):
@@ -120,7 +146,7 @@ class TestBatchRunner(unittest.TestCase):
 
     def test_ply_cap_draw(self):
         with mock.patch.object(model_registry, 'create_engine', side_effect=lambda n, a: FakeBatchEngine()):
-            self._start(rounds=2, max_plies=2)
+            self._start(rounds=2, max_plies=2, use_openings=False)
             snap = self._wait_done(timeout=60)
         recs = self.storage.list_records(batch_id=snap['batch']['id'])
         self.assertEqual(len(recs), 2)
@@ -139,6 +165,102 @@ class TestBatchRunner(unittest.TestCase):
         for rec in recs:
             self.assertEqual(rec['batch_id'], snap['batch']['id'])
 
+    def test_tally_is_per_model_not_per_color(self):
+        # A 永远赢：A 执白时白胜、A 执黑时黑胜，按模型计数应全部记给 A
+        rounds = [
+            batch_mod.BatchRound(0, 'A', None, 'B', None, True),
+            batch_mod.BatchRound(1, 'B', None, 'A', None, False),
+        ]
+        self.runner._batch = {"id": "x", "created_at": "2026-01-01T00:00:00Z", "rounds_completed": 0,
+                              "tally": {"a_win": 0, "b_win": 0, "draw": 0}}
+        self.runner._on_game_complete(rounds[0], "white")
+        self.runner._on_game_complete(rounds[1], "black")
+        self.runner._on_game_complete(rounds[1], "draw")
+        self.assertEqual(self.runner._batch["tally"], {"a_win": 2, "b_win": 0, "draw": 1})
+
+    def test_opening_pairs_share_line_and_swap_colors(self):
+        openings = [["e2e4", "e7e5"], ["d2d4", "d7d5"], ["c2c4"]]
+        cfg = batch_mod.BatchConfig(white_model='A', black_model='B', rounds=6)
+        rounds = batch_mod.build_rounds(cfg, openings, random.Random(0))
+        self.assertEqual(len(rounds), 6)
+        for first, second in zip(rounds[::2], rounds[1::2]):
+            self.assertEqual(first.opening, second.opening)
+            self.assertTrue(first.a_is_white)
+            self.assertFalse(second.a_is_white)
+            self.assertEqual((first.white_model, second.white_model), ('A', 'B'))
+        self.assertEqual(len({tuple(r.opening) for r in rounds}), 3)
+
+    def test_bundled_openings_are_legal(self):
+        openings = batch_mod.load_openings()
+        self.assertGreaterEqual(len(openings), 16)
+        for line in openings:
+            board = chess.Board()
+            for uci in line:
+                move = chess.Move.from_uci(uci)
+                self.assertIn(move, board.legal_moves, f"{line}: {uci}")
+                board.push(move)
+
+    def test_records_start_from_opening(self):
+        with mock.patch.object(model_registry, 'create_engine', side_effect=lambda n, a: FakeBatchEngine()):
+            self._start(rounds=2)
+            snap = self._wait_done(timeout=60)
+        recs = self.storage.list_records(batch_id=snap['batch']['id'])
+        self.assertEqual(len(recs), 2)
+        prefixes = {" ".join(r['moves'].split()[:4]) for r in recs}
+        self.assertEqual(len(prefixes), 1)  # 同一开局对
+        line = prefixes.pop().split()
+        self.assertTrue(any(o[:4] == line for o in batch_mod.load_openings()))
+
+    def test_worker_error_stops_whole_batch(self):
+        with mock.patch.object(model_registry, 'create_engine', side_effect=lambda n, a: FailingEngine()):
+            self._start(rounds=20)
+            snap = self._wait_done(timeout=60)
+        self.assertEqual(snap['batch']['status'], 'error')
+        self.assertIn('boom', snap['batch']['error'])
+        # 等全部 worker 退出后才允许新批次
+        deadline = time.time() + 10
+        while self.runner.is_running and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(self.runner.is_running)
+        self.assertEqual(snap['batch']['rounds_completed'], 0)
+        self.assertEqual(self.storage.list_records(batch_id=snap['batch']['id']), [])
+
+    def test_error_status_only_after_all_workers_exit(self):
+        release = threading.Event()
+        engines = iter([FailingEngine(), FailingEngine()] + [BlockingEngine(release) for _ in range(40)])
+        lock = threading.Lock()
+
+        def factory(n, a):
+            with lock:
+                return next(engines)
+
+        with mock.patch.object(model_registry, 'create_engine', side_effect=factory):
+            self._start(rounds=8)
+            deadline = time.time() + 10
+            while self.runner.snapshot()['batch']['error'] is None and time.time() < deadline:
+                time.sleep(0.05)
+            snap = self.runner.snapshot()
+            self.assertTrue(snap['is_running'])  # 其余 worker 仍在收尾
+            self.assertEqual(snap['batch']['status'], 'running')
+            release.set()
+            snap = self._wait_done(timeout=30)
+        self.assertEqual(snap['batch']['status'], 'error')
+
+    def test_start_validation(self):
+        for rounds in (0, 3, batch_mod.MAX_ROUNDS + 2):
+            with self.assertRaises(batch_mod.BatchError):
+                self._start(rounds=rounds)
+        with self.assertRaises(batch_mod.BatchError):
+            self._start(rounds=2, max_plies=batch_mod.MAX_PLIES_CAP + 1)
+
+    def test_gpu_busy_refuses_start(self):
+        with mock.patch.object(batch_mod, 'gpu_free_mib', return_value=100):
+            with self.assertRaises(batch_mod.GpuBusyError):
+                self._start(rounds=2, min_free_gpu_mib=4096)
+        with mock.patch.object(batch_mod, 'gpu_free_mib', return_value=None), \
+                mock.patch.object(model_registry, 'create_engine', side_effect=lambda n, a: FakeBatchEngine()):
+            self._start(rounds=2, min_free_gpu_mib=4096)  # 查询不到显存时不阻塞
+
     def test_storage_migration_adds_batch_id(self):
         import sqlite3
         conn = sqlite3.connect(str(self.db))
@@ -156,6 +278,49 @@ class TestBatchRunner(unittest.TestCase):
         row = storage2.get_record("mig-1")
         self.assertIsNotNone(row)
         self.assertEqual(row.get('batch_id'), 'batch-1')
+
+
+class TestBatchAdminAuth(unittest.TestCase):
+    """/api/arena/batch/start 的管理员鉴权。"""
+
+    @staticmethod
+    def _request(client='127.0.0.1', **headers):
+        from starlette.requests import Request
+        raw = [(k.replace('_', '-').lower().encode(), v.encode()) for k, v in headers.items()]
+        return Request({"type": "http", "headers": raw, "client": (client, 12345)})
+
+    def setUp(self):
+        import app
+        self.app = app
+        patcher = mock.patch.dict('os.environ', {'UNICHESS_ADMIN_TOKEN': 's3cret'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _denied(self, req):
+        with self.assertRaises(self.app.HTTPException) as ctx:
+            self.app.require_admin(req)
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_valid_token_allowed_from_anywhere(self):
+        self.app.require_admin(self._request('203.0.113.9', x_admin_token='s3cret', cf_connecting_ip='203.0.113.9'))
+
+    def test_wrong_or_missing_token_denied_remotely(self):
+        self._denied(self._request('203.0.113.9'))
+        self._denied(self._request('203.0.113.9', x_admin_token='nope'))
+
+    def test_direct_localhost_allowed(self):
+        self.app.require_admin(self._request('127.0.0.1'))
+
+    def test_tunneled_public_request_denied(self):
+        # 隧道把公网请求转成 127.0.0.1，但 Cloudflare/nginx 会带上转发头
+        self._denied(self._request('127.0.0.1', x_forwarded_for='198.51.100.7'))
+        self._denied(self._request('127.0.0.1', cf_connecting_ip='198.51.100.7'))
+
+    def test_no_token_configured_rejects_token_guessing(self):
+        with mock.patch.dict('os.environ', {'UNICHESS_ADMIN_TOKEN': ''}), \
+                mock.patch.object(self.app, 'ADMIN_TOKEN_FILE', pathlib.Path('/nonexistent/admin_token')):
+            self._denied(self._request('203.0.113.9', x_admin_token=''))
+            self._denied(self._request('203.0.113.9', x_admin_token='anything'))
 
 
 if __name__ == '__main__':

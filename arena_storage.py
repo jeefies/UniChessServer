@@ -279,53 +279,6 @@ class ArenaStorage:
             finally:
                 conn.close()
 
-    def list_records(self, limit: int = 50, offset: int = 0, batch_id: str | None = None) -> list[dict[str, Any]]:
-        """获取对弈记录列表，按创建时间倒序返回。batch_id 为 None 时不过滤。"""
-        with self._lock:
-            conn = self._get_connection()
-            try:
-                cursor = conn.cursor()
-                sql = """
-                    SELECT id, created_at, end_time,
-                           white_model, white_arg, black_model, black_arg,
-                           moves, ply_count, result, winner, termination_reason,
-                           batch_id
-                    FROM arena_records
-                """
-                params: list[Any] = []
-                if batch_id is not None:
-                    sql += " WHERE batch_id = ?"
-                    params.append(batch_id)
-                sql += " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?"
-                params.extend([limit, offset])
-                cursor.execute(sql, params)
-                rows = cursor.fetchall()
-                return [dict(row) for row in rows]
-            finally:
-                conn.close()
-
-    def get_record(self, record_id: str) -> dict[str, Any] | None:
-        """根据 id 查询单条记录。"""
-        with self._lock:
-            conn = self._get_connection()
-            try:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT id, created_at, end_time,
-                           white_model, white_arg, black_model, black_arg,
-                           moves, ply_count, result, winner, termination_reason,
-                           batch_id
-                    FROM arena_records
-                    WHERE id = ?
-                    """,
-                    (record_id,),
-                )
-                row = cursor.fetchone()
-                return dict(row) if row else None
-            finally:
-                conn.close()
-
 
 # 模块级单例
 storage = ArenaStorage()

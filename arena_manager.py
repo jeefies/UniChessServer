@@ -69,6 +69,18 @@ class ArenaSession:
             self.black_engine.setup(fen_str)
             self.san_history = []
 
+    def play_opening(self, ucis: list[str]) -> None:
+        """把开局着法同时推进服务层 board 与双方引擎（引擎不思考）。"""
+        with self._op_lock:
+            for uci in ucis:
+                move = chess.Move.from_uci(uci)
+                if move not in self.board.legal_moves:
+                    raise ArenaError(f'开局着法 "{uci}" 在当前局面下不合法')
+                self.san_history.append(self.board.san(move))
+                self.board.push(move)
+                self.white_engine.human_move(uci)
+                self.black_engine.human_move(uci)
+
     def step(self) -> dict[str, Any]:
         """执行单步对弈。
 
@@ -76,7 +88,7 @@ class ArenaSession:
         若对局终局，自动保存记录并 cleanup() 释放引擎。
         """
         with self._op_lock:
-            if self.board.is_game_over():
+            if self.board.is_game_over(claim_draw=True):
                 return self._build_game_over_result()
 
             turn_is_white = self.board.turn == chess.WHITE
@@ -117,7 +129,7 @@ class ArenaSession:
                 logger.exception("对手引擎 human_move 同步失败: %s", uci)
                 raise ArenaError(f"对手引擎同步走法失败: {e}") from e
 
-            is_over = self.board.is_game_over()
+            is_over = self.board.is_game_over(claim_draw=True)
             result, winner, termination_reason = self._evaluate_outcome()
 
             step_data = {
@@ -157,7 +169,7 @@ class ArenaSession:
                 "fen": self.board.fen(),
                 "turn": "white" if self.board.turn == chess.WHITE else "black",
                 "legal_moves": [m.uci() for m in self.board.legal_moves],
-                "is_game_over": self.board.is_game_over(),
+                "is_game_over": self.board.is_game_over(claim_draw=True),
                 "result": result,
                 "winner": winner,
                 "termination_reason": termination_reason,
@@ -171,10 +183,10 @@ class ArenaSession:
 
     def _evaluate_outcome(self) -> tuple[str, str | None, str | None]:
         """判定对局当前胜负结果、赢家和终局原因。"""
-        if not self.board.is_game_over():
+        if not self.board.is_game_over(claim_draw=True):
             return "*", None, None
 
-        outcome = self.board.outcome()
+        outcome = self.board.outcome(claim_draw=True)
         if outcome is None:
             return "*", None, None
 
@@ -234,7 +246,7 @@ class ArenaSession:
             self.is_cleaned = True
 
             # 若尚未对局结束，由外部或LRU淘汰/关闭，标记为 stopped 存库
-            if save_stopped and not self.board.is_game_over():
+            if save_stopped and not self.board.is_game_over(claim_draw=True):
                 self._save_record_to_db(result="*", winner="stopped", termination_reason="stopped")
 
             for role, eng in (("white", self.white_engine), ("black", self.black_engine)):

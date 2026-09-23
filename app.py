@@ -26,6 +26,8 @@ GameEngine 类（见 models/__init__.py 顶部注释的契约），即可通过�
 from __future__ import annotations
 
 import argparse
+import hmac
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -70,6 +72,40 @@ class BatchStartRequest(BaseModel):
     black_arg: str | None = None
     rounds: int = 8
     max_plies: int = 400
+
+
+# --- 管理员鉴权（批量对弈等耗 GPU 的操作） ---
+#
+# 口令来源：环境变量 UNICHESS_ADMIN_TOKEN，否则读 ~/.config/unichess/admin_token（不入库）。
+# 请求头 X-Admin-Token 与口令一致即放行；否则仅放行"真正的本机直连"。
+# 公网流量经隧道到达时对端地址也是 127.0.0.1，因此带任何代理转发头
+# （Cloudflare / nginx 会追加）的请求一律不算本机。
+ADMIN_TOKEN_FILE = Path.home() / ".config" / "unichess" / "admin_token"
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_PROXY_HEADERS = ("x-forwarded-for", "x-real-ip", "cf-connecting-ip", "forwarded", "cf-ray")
+
+
+def _admin_token() -> str | None:
+    token = os.environ.get("UNICHESS_ADMIN_TOKEN", "").strip()
+    if token:
+        return token
+    try:
+        token = ADMIN_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return token or None
+
+
+def require_admin(request: Request) -> None:
+    supplied = request.headers.get("x-admin-token", "")
+    expected = _admin_token()
+    if supplied and expected and hmac.compare_digest(supplied.encode(), expected.encode()):
+        return
+    client = request.client.host if request.client else ""
+    proxied = any(h in request.headers for h in _PROXY_HEADERS)
+    if client in _LOOPBACK_HOSTS and not proxied:
+        return
+    raise HTTPException(status_code=403, detail="批量对弈仅限管理员启动（需要有效的管理员口令）")
 
 
 def _session_error_to_http(e: Exception) -> HTTPException:
@@ -268,7 +304,8 @@ def batch_page():
 
 
 @app.post("/api/arena/batch/start")
-def start_batch(req: BatchStartRequest):
+def start_batch(req: BatchStartRequest, request: Request):
+    require_admin(request)
     try:
         runner = batch_mod.BatchRunner.get()
         config = batch_mod.BatchConfig(
@@ -276,12 +313,16 @@ def start_batch(req: BatchStartRequest):
             white_arg=req.white_arg,
             black_model=req.black_model,
             black_arg=req.black_arg,
-            rounds=max(1, req.rounds),
-            max_plies=max(1, req.max_plies),
+            rounds=req.rounds,
+            max_plies=req.max_plies,
         )
         snapshot = runner.start(config)
     except batch_mod.BatchAlreadyRunningError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except batch_mod.GpuBusyError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except batch_mod.BatchError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except model_registry.ModelNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except (model_registry.ModelNotImplementedError, NotImplementedError) as e:
