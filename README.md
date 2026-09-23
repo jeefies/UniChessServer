@@ -5,11 +5,14 @@
 ## 目录结构
 
 - `app.py` 路由与调度
-- `session_manager.py` 会话生命周期 + 合法性权威 + 调度时序
+- `session_manager.py` 会话生命周期 + 合法性权威 + 调度时序（终局用 UniChessKit 的 `classify`）
+- `jobs.py` 批量对弈与网页观战：提交 UniChessKit 后台 job（独立进程组 + GPU 租约），读 job 目录同步进度
+- `kit_env.py` 定位 UniChessKit（默认 `../Kit`，可用 `UNICHESS_KIT_ROOT` 覆盖；kit 不 pip 安装）
+- `arena_storage.py` 对弈记录 / 批次 SQLite（`data/arena/arena_history.db`）
 - `models/__init__.py` 模型发现/加载/预设查表
 - `models/{model_name}/engine.py` + `config.json`
 - `static/` 前端页面（`index.html` 对局页）
-- `tests/test_server.py` unittest 验收套件
+- `tests/test_server.py` 对局接口验收；`tests/test_jobs.py` 批量对弈 / 观战 / 存储 / 管理员鉴权
 
 ## HTTP API（全部返回 JSON）
 
@@ -29,6 +32,26 @@
 
 调度时序：`engine_white=true` 时新局由服务层触发引擎开局第一步；人类每走一步后轮到引擎则自动应答；悔棋回退双方各一步后若轮到引擎会重新触发引擎走子。
 
+## 观战与批量对弈（UniChessKit job）
+
+两者都不在服务进程里跑引擎，而是写 `data/jobs/<id>/job.json` 后启动 `python -m unichess_kit.jobs`
+（独立进程组，cwd 为 job 目录，启动前按 `gpu_mib` 申请 GPU 租约，显存不足直接 `gpu_busy` 退出）。
+Server 只读 job 目录（`status.json` / `live.json` / `results.jsonl`），后台 Monitor 线程每 2 秒把进度入库。
+
+- 引擎解析：`GameEngine` 声明类属性 `KIT_FACTORY = "包.模块:函数"`（模块须在模型目录内，以 `preset=<arg>` 调用）
+  时走 kit 原生 Player（单进程 8 局并发、跨局攒批，如 R）；否则由 `unichess_kit.serving` 把六方法包装成 Player
+  （每进程一局，4 进程并行，如 T 的 C++ MCTS、M6）。
+- 观战 `POST /api/arena/new`（`white_model/white_arg/black_model/black_arg/fen`）→ 一局 game job 在后台连续下完；
+  `POST /api/arena/games/{id}/step` 按序揭示下一步，引擎还没走出时最多等 20 秒，仍无则 `step.pending=true`；
+  `step.turn` 为刚走棋的一方，`step.eval` 为白方视角。最多 2 局同时观战（超出停最旧一局并记 `stopped`）；
+  `DELETE` 结束并入库；没人单步的局下完后由 Monitor 自动入库。
+- 批量对弈 `POST /api/arena/batch/start` / `POST /api/arena/batch/stop` **仅管理员**（`X-Admin-Token` 或直连 localhost；
+  隧道流量靠转发头识别为公网）。轮数为 2..200 的偶数，同开局换色成对；开局取 kit 自带开局库。统计按模型 A/B
+  （`tally.a_win/b_win/draw`），`GET /api/arena/batch/state` 的 `batch.summary` 带 Elo±95%CI、五项分布、重复局率等。
+  每局以 `<batch_id>-g<n>` 入库，`GET /api/arena/records?batch_id=<id>` 按批次筛选（`__batch__` = 所有批次局）。
+- 错误码：409 已有批次在跑；503 GPU 租约拒绝（训练等占用显存）；其余同对局接口。
+- 服务重启：job 进程随 cgroup 一起结束；启动时 running 批次若 job 已写完就照常收尾，否则记 `interrupted`。
+
 ## GameEngine 契约
 
 每个 `models/{model_name}/engine.py` 必须暴露 `class GameEngine`，实现六个方法：
@@ -41,7 +64,7 @@
 - `undo()`
 - `cleanup()`：释放 GPU/搜索树资源，淘汰时调用
 
-类属性 `IMPLEMENTED=False` + `NOT_IMPLEMENTED_REASON="..."` 表示占位未接入（`/api/models` 如实报告 `not_implemented`，`/api/new` 返回 501）。
+可选类属性 `KIT_FACTORY`（见上节）。类属性 `IMPLEMENTED=False` + `NOT_IMPLEMENTED_REASON="..."` 表示占位未接入（`/api/models` 如实报告 `not_implemented`，`/api/new` 返回 501）。
 
 `config.json` 格式 `{"<arg_name>": {**kwargs}}`，缺省 `{}`。
 

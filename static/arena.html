@@ -1533,6 +1533,9 @@ async function executeStep() {
 
     if (res.state.is_game_over) {
       handleGameOver(res.state);
+    } else if (!step || !step.move) {
+      // 后台对局进程还没走出下一步（step.pending）：保持思考状态，自动播放会继续轮询
+      setStatus(`AI 正在思考 (${res.state.turn === 'white' ? '白方' : '黑方'})...`, 'thinking');
     } else {
       setStatus(`走法已推入: ${step.san || step.move} (${step.engine_ms} ms)。`);
     }

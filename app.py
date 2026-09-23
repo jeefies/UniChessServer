@@ -10,7 +10,8 @@ GameEngine 类（见 models/__init__.py 顶部注释的契约），即可通过�
   同一局内所有请求都路由到同一个实例，搜索树/cache 可以正确复用推进。
 - 进程内最多同时持有 4 个对局实例（滑动窗口 LRU），超过则强制淘汰最旧
   的一个并调用其 cleanup() 释放资源。
-- 竞技场（Arena）管理双引擎自动对战，最多同时持有 2 个对局实例。
+- 竞技场观战与批量对弈都是 UniChessKit 后台 job（独立进程组 + GPU 租约），
+  见 jobs.py；观战最多同时 2 局，批量对弈同一时刻 1 批且仅管理员可启停。
 - 走法合法性判定的权威在服务层（python-chess），不信任模型引擎自行判断。
 - /api/models 如实上报每个引擎的状态（available / not_implemented），
   不把必然返回 501 的占位引擎广告成可用。
@@ -35,9 +36,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-import arena_manager as am
 import arena_storage as a_storage
-import batch_runner as batch_mod
+import jobs
 import models as model_registry
 import session_manager as sm
 
@@ -109,7 +109,7 @@ def require_admin(request: Request) -> None:
 
 
 def _session_error_to_http(e: Exception) -> HTTPException:
-    if isinstance(e, (sm.SessionNotFoundError, am.ArenaNotFoundError)):
+    if isinstance(e, sm.SessionNotFoundError):
         return HTTPException(status_code=404, detail=str(e))
     if isinstance(e, (sm.InvalidFenError, sm.IllegalMoveError)):
         return HTTPException(status_code=400, detail=str(e))
@@ -211,65 +211,63 @@ def arena_page():
     return FileResponse(str(arena_html))
 
 
+def _engine_error_to_http(e: Exception) -> HTTPException:
+    """引擎解析 / job 启动类错误的统一映射（观战与批量对弈共用）。"""
+    if isinstance(e, model_registry.ModelNotFoundError):
+        return HTTPException(status_code=404, detail=str(e))
+    if isinstance(e, (model_registry.ModelNotImplementedError, NotImplementedError)):
+        return HTTPException(status_code=501, detail=str(e) or "引擎尚未接入，暂不可对局。")
+    if isinstance(e, (model_registry.ArgPresetNotFoundError, jobs.InvalidBatchConfigError)):
+        return HTTPException(status_code=400, detail=str(e))
+    if isinstance(e, jobs.BatchAlreadyRunningError):
+        return HTTPException(status_code=409, detail=str(e))
+    if isinstance(e, jobs.GpuBusyError):
+        return HTTPException(status_code=503, detail=str(e))
+    if isinstance(e, sm.SessionError):
+        return _session_error_to_http(e)
+    return HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
 @app.post("/api/arena/new")
 def new_arena(req: NewArenaRequest):
     try:
-        session = am.manager.create(
+        watch = jobs.arena_service().create(
             white_model=req.white_model,
             white_arg=req.white_arg,
             black_model=req.black_model,
             black_arg=req.black_arg,
             fen=req.fen,
         )
-    except model_registry.ModelNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except (model_registry.ModelNotImplementedError, NotImplementedError) as e:
-        raise HTTPException(status_code=501, detail=str(e) or "引擎尚未接入，暂不可对局。")
-    except model_registry.ArgPresetNotFoundError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except (sm.SessionError, am.ArenaError) as e:
-        raise _session_error_to_http(e)
+        return {"arena_id": watch.arena_id, "state": watch.state()}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
-
-    return {"arena_id": session.arena_id, "state": session.state()}
+        raise _engine_error_to_http(e)
 
 
 @app.post("/api/arena/games/{arena_id}/step")
 def arena_step(arena_id: str):
+    """揭示下一步；引擎还在想时最多等 jobs.STEP_WAIT_S 秒，仍没有则 step.pending=true。"""
     try:
-        session = am.manager.get(arena_id)
-        step_result = session.step()
-    except (sm.SessionError, am.ArenaError) as e:
-        raise _session_error_to_http(e)
+        watch = jobs.arena_service().get(arena_id)
+        step_result = watch.step()
+        return {"arena_id": arena_id, "step": step_result, "state": watch.state()}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
-
-    return {"arena_id": arena_id, "step": step_result, "state": session.state()}
+        raise _engine_error_to_http(e)
 
 
 @app.get("/api/arena/games/{arena_id}/state")
 def arena_state(arena_id: str):
     try:
-        session = am.manager.get(arena_id)
-        state = session.state()
-    except (sm.SessionError, am.ArenaError) as e:
-        raise _session_error_to_http(e)
+        return {"arena_id": arena_id, "state": jobs.arena_service().get(arena_id).state()}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
-
-    return {"arena_id": arena_id, "state": state}
+        raise _engine_error_to_http(e)
 
 
 @app.delete("/api/arena/games/{arena_id}")
 def close_arena(arena_id: str):
     try:
-        am.manager.close(arena_id)
-    except (sm.SessionError, am.ArenaError) as e:
-        raise _session_error_to_http(e)
+        jobs.arena_service().close(arena_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
-
+        raise _engine_error_to_http(e)
     return {"arena_id": arena_id, "closed": True}
 
 
@@ -307,8 +305,7 @@ def batch_page():
 def start_batch(req: BatchStartRequest, request: Request):
     require_admin(request)
     try:
-        runner = batch_mod.BatchRunner.get()
-        config = batch_mod.BatchConfig(
+        return jobs.batch_service().start(
             white_model=req.white_model,
             white_arg=req.white_arg,
             black_model=req.black_model,
@@ -316,31 +313,40 @@ def start_batch(req: BatchStartRequest, request: Request):
             rounds=req.rounds,
             max_plies=req.max_plies,
         )
-        snapshot = runner.start(config)
-    except batch_mod.BatchAlreadyRunningError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except batch_mod.GpuBusyError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except batch_mod.BatchError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except model_registry.ModelNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except (model_registry.ModelNotImplementedError, NotImplementedError) as e:
-        raise HTTPException(status_code=501, detail=str(e) or "引擎尚未接入，暂不可对局。")
-    except model_registry.ArgPresetNotFoundError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
-    return snapshot
+        raise _engine_error_to_http(e)
+
+
+@app.post("/api/arena/batch/stop")
+def stop_batch(request: Request):
+    require_admin(request)
+    try:
+        return jobs.batch_service().stop()
+    except Exception as e:
+        raise _engine_error_to_http(e)
 
 
 @app.get("/api/arena/batch/state")
 def batch_state():
     try:
-        runner = batch_mod.BatchRunner.get()
-        return runner.snapshot()
+        return jobs.batch_service().snapshot()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+@app.on_event("startup")
+def _start_job_monitor():
+    """批次进度入库、无人观看的观战对局收尾（服务重启后也会接管遗留批次）。"""
+    app.state.job_monitor = jobs.Monitor(jobs.batch_service(), jobs.arena_service())
+    app.state.job_monitor.start()
+
+
+@app.on_event("shutdown")
+def _stop_job_monitor():
+    monitor = getattr(app.state, "job_monitor", None)
+    if monitor is not None:
+        monitor.stop()
+    jobs.arena_service().close_all()
 
 
 @app.get("/api/health")

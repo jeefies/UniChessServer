@@ -16,6 +16,10 @@ GameEngine 契约（每个 engine.py 必须实现，缺失方法视为未实现�
         # /api/models 据此如实上报状态，而不是把必然 501 的引擎广告成可用。
         IMPLEMENTED: bool = True
         NOT_IMPLEMENTED_REASON: str = ""
+        # 可选：UniChessKit 原生 PlayerFactory（"包.模块:函数"，模块须在模型目录内，
+        # 以 preset=<arg_name> 调用）。声明后批量对弈 / 观战走 kit 原生路径（跨局攒批）；
+        # 不声明则由 kit 把本类的六方法包装成 Player（jobs.py）。
+        KIT_FACTORY: str = "unichess_r.kit_adapter:make_player_factory"
 
         def __init__(self, **kwargs): ...
         def setup(self, fen: str | None = None) -> dict: ...
@@ -228,6 +232,17 @@ def resolve_kwargs(model_name: str, arg_name: str | None) -> dict[str, Any]:
             f'可用预设: {sorted(config.keys())}'
         )
     return dict(config[arg_name])
+
+
+def engine_class(model_name: str) -> type:
+    """按契约校验并返回 GameEngine 类（不实例化；供 jobs 解析 KIT_FACTORY 等类属性）。"""
+    engine_cls = _load_engine_class(model_name)
+    if not bool(getattr(engine_cls, 'IMPLEMENTED', True)):
+        raise ModelNotImplementedError(
+            str(getattr(engine_cls, 'NOT_IMPLEMENTED_REASON', ''))
+            or f'{model_name} 引擎尚未接入，暂不可对局。'
+        )
+    return engine_cls
 
 
 def create_engine(model_name: str, arg_name: str | None = None):

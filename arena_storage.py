@@ -1,7 +1,6 @@
 """竞技场历史对弈持久化存储（SQLite 实现）。"""
 from __future__ import annotations
 
-import datetime
 import json
 import sqlite3
 import threading
@@ -9,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 DB_PATH = Path(__file__).resolve().parent / "data" / "arena" / "arena_history.db"
+BATCH_ANY = "__batch__"
 
 
 class ArenaStorage:
@@ -137,7 +137,11 @@ class ArenaStorage:
                 conn.close()
 
     def list_records(self, limit: int = 50, offset: int = 0, batch_id: str | None = None) -> list[dict[str, Any]]:
-        """获取对弈记录列表，按创建时间倒序返回。batch_id 为 None 时不过滤。"""
+        """获取对弈记录列表，按创建时间倒序返回。
+
+        batch_id：None 不过滤；"__batch__" 只要批量对弈的局；"" 只要非批量（观战）的局；
+        其它值按批次 id 精确匹配。
+        """
         with self._lock:
             conn = self._get_connection()
             try:
@@ -150,7 +154,11 @@ class ArenaStorage:
                     FROM arena_records
                 """
                 params: list[Any] = []
-                if batch_id is not None:
+                if batch_id == BATCH_ANY:
+                    sql += " WHERE batch_id IS NOT NULL AND batch_id != ''"
+                elif batch_id == "":
+                    sql += " WHERE batch_id IS NULL OR batch_id = ''"
+                elif batch_id is not None:
                     sql += " WHERE batch_id = ?"
                     params.append(batch_id)
                 sql += " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?"
@@ -264,18 +272,6 @@ class ArenaStorage:
                     item["tally"] = json.loads(item.pop("tally_json") or "{}")
                     results.append(item)
                 return results
-            finally:
-                conn.close()
-
-    def mark_stale_running_batches(self) -> None:
-        with self._lock:
-            conn = self._get_connection()
-            try:
-                with conn:
-                    conn.execute(
-                        "UPDATE arena_batches SET status = 'interrupted', end_time = COALESCE(end_time, :now) WHERE status = 'running'",
-                        {"now": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-                    )
             finally:
                 conn.close()
 

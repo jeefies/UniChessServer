@@ -28,6 +28,8 @@
 - engine_move() 返回值必须包含非空 "engine_move"（UCI）字段（强制，
   不再是建议）：缺失即报错，绝不允许静默不错位。
 - state() 的 fen 始终取服务层权威 Board，引擎返回值不覆盖。
+- 终局判定用 UniChessKit 的 classify（claim_draw 语义：三次重复 / 50 回合一旦可申请即终局），
+  与批量对弈、观战、各引擎的训练评测口径一致。
 """
 from __future__ import annotations
 
@@ -40,7 +42,9 @@ from typing import Any
 
 import chess
 
+import kit_env  # noqa: F401  挂好 UniChessKit 路径
 import models as model_registry
+from unichess_kit.rules import classify
 
 logger = logging.getLogger('unichess_server.session_manager')
 
@@ -100,6 +104,9 @@ class GameSession:
             )
         self.board.push(move)
 
+    def _is_over(self) -> bool:
+        return classify(self.board) is not None
+
     def _is_engine_turn(self) -> bool:
         return (self.board.turn == chess.WHITE) == self.engine_white
 
@@ -116,7 +123,7 @@ class GameSession:
 
             # 引擎执白且新局面轮到白方时，服务层没有人类走法可等，
             # 由引擎直接走开局第一步。
-            if not self.board.is_game_over() and self._is_engine_turn():
+            if not self._is_over() and self._is_engine_turn():
                 engine_result = self.engine.engine_move()
                 self._push_engine_result(engine_result)
                 return engine_result
@@ -126,6 +133,9 @@ class GameSession:
     def human_move(self, uci: str) -> dict:
         """校验并应用人类走法，若接下来轮到引擎则让引擎应答一步。"""
         with self._op_lock:
+            if self._is_over():
+                # claim_draw 语义下可申请和棋即终局，此时仍有合法着法，必须显式拒绝
+                raise IllegalMoveError('对局已结束，不能继续走子')
             if self._is_engine_turn():
                 raise IllegalMoveError('当前轮到引擎走子，不能提交人类走法')
 
@@ -146,7 +156,7 @@ class GameSession:
                     self.board.pop()
                 raise
 
-            if not self.board.is_game_over() and self._is_engine_turn():
+            if not self._is_over() and self._is_engine_turn():
                 engine_result = self.engine.engine_move()
                 self._push_engine_result(engine_result)
                 return engine_result
@@ -161,7 +171,7 @@ class GameSession:
             # 计算，三者必须来自同一局面，引擎返回值不得覆盖。
             merged['fen'] = self.board.fen()
             merged['legal_moves'] = [m.uci() for m in self.board.legal_moves]
-            merged['is_game_over'] = self.board.is_game_over()
+            merged['is_game_over'] = self._is_over()
             merged['engine_white'] = self.engine_white
             return merged
 
@@ -175,7 +185,7 @@ class GameSession:
             # 回退后若轮到引擎（如引擎执白），必须重新触发引擎走子，
             # 否则没有任何请求会再调用 engine_move()，对局永久卡死在
             # "引擎思考中"（人类提交又会被 IllegalMoveError 拒绝）。
-            if not self.board.is_game_over() and self._is_engine_turn():
+            if not self._is_over() and self._is_engine_turn():
                 engine_result = self.engine.engine_move()
                 self._push_engine_result(engine_result)
                 return engine_result

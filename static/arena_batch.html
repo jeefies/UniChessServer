@@ -42,6 +42,8 @@
   .btn-primary { background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; }
   .btn-primary:hover { filter: brightness(1.1); }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-secondary { background: transparent; color: var(--text); border: 1px solid var(--border, #555); padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; }
+  .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
   .validation-msg { color: var(--accent-red); font-size: 12px; margin-top: 4px; }
 
   .batch-summary { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding: 10px 14px;
@@ -111,12 +113,14 @@
     <div class="control-group"><label>管理员口令</label><input id="admin-token" type="password" autocomplete="off" placeholder="X-Admin-Token"></div>
     <div class="control-group"><label>单局步数上限</label><input id="max-plies" type="number" value="400" min="50" max="1000"></div>
     <button class="btn-primary" id="btn-start">▶ 开始批量对弈</button>
+    <button class="btn-secondary" id="btn-stop-batch" disabled>■ 停止</button>
   </div>
 
   <div class="batch-summary" id="batch-summary" style="display:none">
     <span class="summary-pill pill-idle" id="batch-status">空闲</span>
     <span id="batch-progress">0 / 0</span>
     <span id="batch-tally">A 胜 0 · B 胜 0 · 和棋 0</span>
+    <span id="batch-elo"></span>
   </div>
 
   <div class="batch-grid" id="batch-grid"></div>
@@ -254,6 +258,21 @@ async function loadModels() {
   }
 }
 
+function adminHeaders() {
+  const token = $('admin-token').value.trim();
+  try { if (token) sessionStorage.setItem('unichess-admin-token', token); } catch(e) {}
+  return token ? {'X-Admin-Token': token} : undefined;
+}
+
+async function stopBatch() {
+  if (!batchRunning || !confirm('确定停止当前批次？已下完的局会保留。')) return;
+  try {
+    const snap = await api('/api/arena/batch/stop', 'POST', {}, adminHeaders());
+    batchRunning = !!snap.is_running;
+    renderSummary(snap.batch);
+  } catch(e) { alert('停止失败：' + e.message); }
+}
+
 async function startBatch() {
   if (batchRunning) { alert('批量对弈已在运行中，页面将自动追踪。'); return; }
   const rounds = parseInt($('rounds').value || '8', 10);
@@ -265,9 +284,7 @@ async function startBatch() {
   };
   if (!body.white_model || !body.black_model) { alert('请选择白方与黑方模型'); return; }
   try {
-    const token = $('admin-token').value.trim();
-    try { if (token) sessionStorage.setItem('unichess-admin-token', token); } catch(e) {}
-    const snap = await api('/api/arena/batch/start', 'POST', body, token ? {'X-Admin-Token': token} : undefined);
+    const snap = await api('/api/arena/batch/start', 'POST', body, adminHeaders());
     currentBatchId = snap.batch && snap.batch.id;
     batchRunning = !!snap.is_running;
     $('btn-start').disabled = true;
@@ -281,9 +298,10 @@ function renderSummary(batch) {
   const statusEl = $('batch-status');
   const progressEl = $('batch-progress');
   const tallyEl = $('batch-tally');
+  $('batch-elo').textContent = '';
   if (!batch) { statusEl.textContent = '空闲'; statusEl.className = 'summary-pill pill-idle'; progressEl.textContent = '0 / 0'; tallyEl.textContent = 'A 胜 0 · B 胜 0 · 和棋 0'; return; }
   const s = batch.status;
-  const STATUS_TEXT = { running: '对弈中', completed: '已完成', error: '异常', stopped: '已停止', interrupted: '已中断（服务重启）' };
+  const STATUS_TEXT = { running: '对弈中', completed: '已完成', error: '异常', stopped: '已停止', interrupted: '已中断（进程退出）', gpu_busy: 'GPU 占用，未启动' };
   statusEl.textContent = STATUS_TEXT[s] || s;
   statusEl.className = 'summary-pill ' + (s === 'running' ? 'pill-running' : s === 'completed' ? 'pill-completed' : s === 'error' ? 'pill-error' : 'pill-idle');
   progressEl.textContent = `${batch.rounds_completed} / ${batch.rounds_planned}`;
@@ -292,11 +310,18 @@ function renderSummary(batch) {
   const bName = batch.black_model + (batch.black_arg ? `(${batch.black_arg})` : "");
   tallyEl.textContent = `A ${aName} 胜 ${t.a_win||0} · B ${bName} 胜 ${t.b_win||0} · 和棋 ${t.draw||0}`;
   if (batch.error) tallyEl.textContent += ` · 错误：${batch.error}`;
+  const sm = batch.summary;
+  if (sm && sm.games && sm.elo != null && isFinite(sm.elo)) {
+    const ci = sm.elo_ci95 || [];
+    const f = x => (x == null || !isFinite(x)) ? '∞' : (x > 0 ? '+' : '') + x.toFixed(0);
+    $('batch-elo').textContent = `A 相对 B：Elo ${f(sm.elo)} [${f(ci[0])}, ${f(ci[1])}]` +
+      (sm.duplicate_rate ? ` · 重复局 ${(sm.duplicate_rate * 100).toFixed(0)}%` : '');
+  }
 }
 
 function renderWorkers(workers) {
   const grid = $('batch-grid');
-  const COUNT = 4;
+  const COUNT = Math.max(4, workers.length);
   while (grid.children.length < COUNT) {
     const card = document.createElement('div');
     card.className = 'worker-card';
@@ -307,7 +332,7 @@ function renderWorkers(workers) {
   workers.forEach((w, i) => {
     if (i >= COUNT) return;
     const card = cards[i];
-    card.querySelector('.w-title').textContent = `Worker ${w.index + 1}`;
+    card.querySelector('.w-title').textContent = `${w.white_model}${w.white_arg ? '(' + w.white_arg + ')' : ''} vs ${w.black_model}${w.black_arg ? '(' + w.black_arg + ')' : ''}`;
     card.querySelector('.w-round').textContent = w.round_index != null ? `Round ${w.round_index + 1}` : '-';
     const statusEl = card.querySelector('.w-status');
     statusEl.textContent = w.status || 'idle';
@@ -319,8 +344,13 @@ function renderWorkers(workers) {
     card.querySelector('.wf-san').textContent = sanText;
     renderBoardInto(board, w.fen || '8/8/8/8/8/8/8/8 w - - 0 1', w.last_move, w.in_check);
   });
-  for (let i = workers.length; i < COUNT; i++) {
+  for (let i = workers.length; i < cards.length; i++) {
     const card = cards[i];
+    card.querySelector('.w-title').textContent = '空闲';
+    card.querySelector('.w-round').textContent = '-';
+    card.querySelector('.w-status').textContent = 'idle';
+    card.querySelector('.wf-move').textContent = '-';
+    card.querySelector('.wf-san').textContent = '-';
     const board = card.querySelector('.batch-board');
     renderBoardInto(board, '8/8/8/8/8/8/8/8 w - - 0 1', null, false);
   }
@@ -333,6 +363,7 @@ async function pollState() {
     if (batch && batch.id && batch.id !== currentBatchId) currentBatchId = batch.id;
     batchRunning = !!snap.is_running;
     $('btn-start').disabled = batchRunning;
+    $('btn-stop-batch').disabled = !batchRunning;
     renderSummary(batch);
     renderWorkers(snap.workers || []);
     await renderBatchRecords();
@@ -366,6 +397,7 @@ async function renderBatchRecords() {
 }
 
 $('btn-start').onclick = startBatch;
+$('btn-stop-batch').onclick = stopBatch;
 window.addEventListener('DOMContentLoaded', () => {
   document.body.insertAdjacentHTML('afterbegin', PIECE_DEFS);
   try { const t = sessionStorage.getItem('unichess-admin-token'); if (t) $('admin-token').value = t; } catch(e) {}
