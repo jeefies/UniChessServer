@@ -230,7 +230,18 @@ class TestBatchService(FakeModelsMixin, unittest.TestCase):
         self.assertEqual(final["batch"]["rounds_completed"], 2)
         # 结束后可以再开一批
         svc.start("wrap", None, "wrap", None, rounds=2, max_plies=4)
-        self.assertEqual(self.wait_batch(svc)["batch"]["status"], "completed")
+        last = self.wait_batch(svc)["batch"]
+        self.assertEqual(last["status"], "completed")
+        # 运维从库里删掉已结束的批次后，快照回落到库里最新的批次，且不被回写
+        conn = self.storage._get_connection()
+        try:
+            with conn:
+                conn.execute("DELETE FROM arena_batches WHERE id = ?", (last["id"],))
+        finally:
+            conn.close()
+        snap = svc.snapshot()
+        self.assertEqual(snap["batch"]["id"], final["batch"]["id"])
+        self.assertIsNone(self.storage.get_batch(last["id"]))
 
     def test_validation(self):
         svc = self.batch_service()

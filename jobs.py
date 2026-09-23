@@ -261,6 +261,9 @@ class BatchService:
             if cur is None:
                 return
             handle, row = cur["handle"], cur["row"]
+            if row["status"] != "running" and self._storage.get_batch(row["id"]) is None:
+                self._current = None          # 已结束的批次被运维从库里删了：不再展示、也不回写
+                return
             before = dict(row, tally=dict(row["tally"]))
             records = handle.records()
             tally = {"a_win": 0, "b_win": 0, "draw": 0}
