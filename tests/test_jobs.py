@@ -47,7 +47,7 @@ class GameEngine:
 '''
 
 NATIVE_ADAPTER = '''
-from unichess_kit.testing.fakes import make_fake_player_factory
+from Kit.testing.fakes import make_fake_player_factory
 
 def make_player_factory(preset=None):
     return make_fake_player_factory(name="{name}", salt=preset or "", simulations=8)

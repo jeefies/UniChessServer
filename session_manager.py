@@ -44,7 +44,7 @@ import chess
 
 import kit_env  # noqa: F401  挂好 UniChessKit 路径
 import models as model_registry
-from unichess_kit.rules import classify
+from Kit.rules import classify
 
 logger = logging.getLogger('unichess_server.session_manager')
 

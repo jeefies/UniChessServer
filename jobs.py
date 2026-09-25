@@ -3,7 +3,7 @@
 取代旧的 batch_runner.py（进程内 4 线程）与 arena_manager.py（进程内双引擎单步）：
 
 - 引擎解析：GameEngine 声明了 ``KIT_FACTORY`` 的走 kit 原生 Player（跨局攒批，1 进程 8 并发）；
-  否则用 ``unichess_kit.serving:game_engine_player_factory`` 包装六方法引擎（T 的 C++ MCTS、M6），
+  否则用 ``Kit.serving:game_engine_player_factory`` 包装六方法引擎（T 的 C++ MCTS、M6），
   每个 worker 进程一局，4 进程并行。
 - job 目录 ``data/jobs/<id>/``：job.json / status.json / live.json / results.jsonl / job.log。
   Server 只读这些文件，不与 job 进程通信；服务重启后凭目录接管或收尾（进程已死 = interrupted）。
@@ -36,8 +36,8 @@ import kit_env
 import models as model_registry
 from session_manager import InvalidFenError, SessionError, SessionNotFoundError
 
-from unichess_kit.jobs import STATES_FINAL, JobHandle  # noqa: E402（kit_env 先挂好路径）
-from unichess_kit.rules import classify  # noqa: E402
+from Kit.jobs import STATES_FINAL, JobHandle  # noqa: E402（kit_env 先挂好路径）
+from Kit.rules import classify  # noqa: E402
 
 logger = logging.getLogger("unichess_server.jobs")
 
@@ -57,7 +57,7 @@ STEP_WAIT_S = 20.0
 MAX_ARENA_SESSIONS = 2
 SAN_TAIL = 48
 
-WRAPPED_FACTORY = "unichess_kit.serving:game_engine_player_factory"
+WRAPPED_FACTORY = "Kit.serving:game_engine_player_factory"
 
 
 class JobError(Exception):
@@ -402,14 +402,18 @@ class ArenaWatch:
                     return self._step_payload(None, over=True)
                 moves, details, record = self._source()
                 ply = len(self.board.move_stack)
-                if ply < len(moves):
+                final = self._outcome(record)
+                # 一步 = 一个**完整**的着法记录：着法与它的 detail 必须一起揭示。worker 是先追加
+                # 着法再补 detail 的，若着法到了就揭示，前端评估条会先看到 eval=None 再跳变。
+                # 只有对局已终局（detail 不会再长）才允许拖着法单飞，否则会永远卡住最后一步。
+                if ply < len(moves) and (ply < len(details) or final is not None):
                     data = self._reveal(moves[ply], details[ply] if ply < len(details) else None)
-                    self.final = self._outcome(record)
-                    if self.final is not None:
+                    self.final = final
+                    if final is not None:
                         self._save()
-                    return self._step_payload(data, over=self.final is not None)
-                self.final = self._outcome(record)
-                if self.final is not None:
+                    return self._step_payload(data, over=final is not None)
+                self.final = final
+                if final is not None:
                     self._save()
                     continue
                 if self.stopped:
