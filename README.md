@@ -7,7 +7,7 @@
 - `app.py` 路由与调度
 - `session_manager.py` 会话生命周期 + 合法性权威 + 调度时序（终局用 UniChessKit 的 `classify`）
 - `jobs.py` 批量对弈与网页观战：提交 UniChessKit 后台 job（独立进程组 + GPU 租约），读 job 目录同步进度
-- `kit_env.py` 定位 UniChessKit（默认 `../Kit`，可用 `UNICHESS_KIT_ROOT` 覆盖；kit 不 pip 安装）
+- `kit_env.py` 定位 **import 根**（默认上级目录 `~/UniChess`；kit 不 pip 安装。`UNICHESS_IMPORT_ROOT` 可覆盖，`UNICHESS_KIT_ROOT` 仍兼容但语义已变为 import 根）
 - `arena_storage.py` 对弈记录 / 批次 SQLite（`data/arena/arena_history.db`）
 - `models/__init__.py` 模型发现/加载/预设查表
 - `models/{model_name}/engine.py` + `config.json`
@@ -34,12 +34,12 @@
 
 ## 观战与批量对弈（UniChessKit job）
 
-两者都不在服务进程里跑引擎，而是写 `data/jobs/<id>/job.json` 后启动 `python -m unichess_kit.jobs`
+两者都不在服务进程里跑引擎，而是写 `data/jobs/<id>/job.json` 后启动 `python -m Kit.jobs`
 （独立进程组，cwd 为 job 目录，启动前按 `gpu_mib` 申请 GPU 租约，显存不足直接 `gpu_busy` 退出）。
 Server 只读 job 目录（`status.json` / `live.json` / `results.jsonl`），后台 Monitor 线程每 2 秒把进度入库。
 
 - 引擎解析：`GameEngine` 声明类属性 `KIT_FACTORY = "包.模块:函数"`（模块须在模型目录内，以 `preset=<arg>` 调用）
-  时走 kit 原生 Player（单进程 8 局并发、跨局攒批，如 R）；否则由 `unichess_kit.serving` 把六方法包装成 Player
+  时走 kit 原生 Player（单进程 8 局并发、跨局攒批，如 R）；否则由 `Kit.serving` 把六方法包装成 Player
   （每进程一局，4 进程并行，如 T 的 C++ MCTS、M6）。
 - 观战 `POST /api/arena/new`（`white_model/white_arg/black_model/black_arg/fen`）→ 一局 game job 在后台连续下完；
   `POST /api/arena/games/{id}/step` 按序揭示下一步，引擎还没走出时最多等 20 秒，仍无则 `step.pending=true`；
