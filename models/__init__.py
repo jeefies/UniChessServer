@@ -231,7 +231,11 @@ def resolve_kwargs(model_name: str, arg_name: str | None) -> dict[str, Any]:
             f'models/{model_name}/config.json 中不存在预设 "{arg_name}"。'
             f'可用预设: {sorted(config.keys())}'
         )
-    return dict(config[arg_name])
+    kwargs = dict(config[arg_name])
+    # description 是给 UI 看的中文说明，**不是**工厂参数；原样传进去会让
+    # make_player_factory(**kwargs) 报 "unexpected keyword argument 'description'"。
+    kwargs.pop('description', None)
+    return kwargs
 
 
 def engine_class(model_name: str) -> type:
