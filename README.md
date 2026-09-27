@@ -102,7 +102,7 @@ python app.py --host 127.0.0.1 --port 8000
 |---|---|---|
 | `T` | 符号链接 → `/home/jeefy/UniChess/Transformer`（Transformer 项目真实引擎，跨会话共享权重单例） | available，预设 `max_mcts`, `max_t` |
 | `R` | 符号链接 → `/home/jeefy/UniChess/ResNet`（ResNet 项目引擎） | available，预设 `policy`, `fast`, `max_mcts`, `cpu` |
-| `S` | 符号链接 → `/home/jeefy/UniChess/SSM`（状态序列模型主线，stage B 自对弈 RL） | available，预设 `champion`, `champion_server` |
+| `S` | 符号链接 → `/home/jeefy/UniChess/SSM`（状态序列模型主线，stage B 自对弈 RL） | available，预设 `champion` |
 | `M6` | 符号链接 → `/home/jeefy/UniChess/M6`（上游冻结可玩包：`src/chess_ai` 30M finalist + `NeuralMCTS`，3,695,244 参数 / 14.8MB 权重） | available，预设 `default`, `preview` |
 
 命名约定：模型名保持简短（`T` 而非 `transformer`，`R` 而非 `resnet`），避免冗长；接入新项目时用符号链接 + 简短名，例如 `ln -s /home/jeefy/UniChess/ResNet models/R`。旧有的占位桩目录（`models/transformer/`、`models/resnet/`）已被对应的符号链接取代并清理。
