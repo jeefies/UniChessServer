@@ -1,0 +1,23 @@
+{
+  "default": {
+    "seconds": 2.0,
+    "depth": 5,
+    "qdepth": 6,
+    "claim_draw": true,
+    "description": "标准档：每步至多 2 秒、迭代加深上限 5 层。"
+  },
+  "fast": {
+    "seconds": 0.5,
+    "depth": 4,
+    "qdepth": 6,
+    "claim_draw": true,
+    "description": "快档：每步至多 0.5 秒、深度 4，适合观战/高并发。"
+  },
+  "deep": {
+    "seconds": 5.0,
+    "depth": 6,
+    "qdepth": 6,
+    "claim_draw": true,
+    "description": "强档：每步至多 5 秒、深度 6，即上游 CLI 的默认预算。"
+  }
+}

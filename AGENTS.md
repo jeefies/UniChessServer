@@ -7,8 +7,9 @@
 - Python：`/home/jeefy/miniconda3/envs/unichess/bin/python`（无 pytest，全部用标准库 `unittest`）
 - 无 `pyproject.toml` / `requirements.txt` / CI：直接 `python app.py` 运行
 - 启动：`python app.py --host 127.0.0.1 --port 8000`（仅接受 `--host/--port`）
-- 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；77 项，其中 M3 16 项）。
-  Windows 本机有 3 项因符号链接权限必失败（与 M6/M3 无关），远端全绿
+- 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；98 项，
+  其中 M3 16 项 / M2 21 项）。Windows 本机有 3 项因符号链接权限必失败
+  （与 M2/M3 无关），远端全绿
 - 远端部署：systemd 用户级服务 `unichess-server.service` + `unichess-tunnel.service`
 - 接口清单与模型插件契约见 `README.md`（刷新区块务必同步两份）
 
@@ -39,6 +40,14 @@
   `~/UniChess/M3`（zip 原件留在 `~/UniChess/.m6-backup-20260927/`，不在任何仓库里），
   替换后跑 `tests/test_m3_engine.py` 验收。它自己没有 git 仓库，
   `Server/.gitignore` 用权重/压缩包规则挡住误提交
+- M2（上游 `chess_ai` neural v2.0.0，CPU 引擎）**适配层在仓库里**：
+  `models/M2/engine.py` + `config.json`，包在 import 根下 `M2/`（不在 git，
+  `UNICHESS_M2_ROOT` 可覆盖包根）。与 M3 的结构差别：M3 是 `src/chess_ai`
+  命名空间包 + 自带适配层；M2 是一堆裸顶层模块、没有适配层，由本仓接线。
+- M2 的两个坑：① 20 逻辑核上 torch 线程开满会让微型 CNN 慢 450 倍，
+  适配层默认压 4 线程（进程级全局，GPU 引擎不受影响）；② `FastEvaluator`
+  复用输入缓冲区不可并发共用，权重共享但评估器/搜索树每会话一份。
+- M2 的 `eval` 恒为 None（只有 tanh 标量、不伪造 WDL），原生分在 `value_tanh`。
 - M3 的 `engine.py` 只认 `simulations`/`eval_batch_size`/`reuse_tree`/`c_puct`/`device`
   五个参数（无 `ckpt`，权重路径包内硬编码），`state()` 的 `eval` 是白方视角 WDL 字典
 - M3 的 `state()` 用 `en_passant="fen"`（双步进兵后总写给区格），服务层 `state()` 用

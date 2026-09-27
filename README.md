@@ -104,6 +104,7 @@ python app.py --host 127.0.0.1 --port 8000
 | `R` | 符号链接 → `/home/jeefy/UniChess/ResNet`（ResNet 项目引擎） | available，预设 `policy`, `fast`, `max_mcts`, `cpu` |
 | `S` | 符号链接 → `/home/jeefy/UniChess/SSM`（状态序列模型主线，stage B 自对弈 RL） | available，预设 `champion` |
 | `M3` | 符号链接 → `/home/jeefy/UniChess/M3`（上游冻结可玩包：`src/chess_ai` 30M finalist + `NeuralMCTS`，3,695,244 参数 / 14.8MB 权重） | available，预设 `default`, `preview` |
+| `M2` | 真实目录 `models/M2/`（适配层）+ `/home/jeefy/UniChess/M2`（上游 chess_ai neural v2.0.0 原包：策略网 `ChessCNN` + 价值网 `ResidualValueModel` + negamax/PUCT 搜索） | available，预设 `default`, `fast`, `deep` |
 
 命名约定：模型名保持简短（`T` 而非 `transformer`，`R` 而非 `resnet`），避免冗长；接入新项目时用符号链接 + 简短名，例如 `ln -s /home/jeefy/UniChess/ResNet models/R`。旧有的占位桩目录（`models/transformer/`、`models/resnet/`）已被对应的符号链接取代并清理。
 
@@ -133,9 +134,40 @@ M3 对应的是**上游冻结产物**（上游模型名 M6 30M finalist，注册
 - 已知边界：包只做人机对弈适配，不带开局库/UCI/时间控制/批量优化；上游未跑完整对局与
   性能扫描，Elo 未知。
 
+### M2 引擎说明
+
+同样是上游冻结产物，但**结构与 M3 不同**，接线方式也不一样：
+
+- 部署物：`kesiweim/chess_ai` 的 release `v2.0.0`（资产 `neural-v2.0.0.zip`，
+  GitHub API digest `e42b92a4…d18ef6`），解压到 `/home/jeefy/UniChess/M2`。
+  包是一堆**裸顶层模块**（`model_cnn` / `search_engine` / `neural_fast` …）+ 两个权重
+  （策略网 `chess_model_balanced.pt` 13,157,801B、价值网
+  `value_full_runs/*/value_full_epoch2.pt` 2,590,579B），
+  SHA-256 与上游 README 声明值逐一核对一致。zip 原件在 `~/UniChess/.m2-package-20260927/`。
+- **适配层在仓库里**：`models/M2/engine.py`（+ `config.json`）。因为上游没带
+  UniChessServer 适配层，这是 Server 侧的接线代码，归本仓库维护；
+  包目录本身不放 git、也不改一个字节。包根默认取 import 根下的 `M2`，
+  可用 `UNICHESS_M2_ROOT` 覆盖（测试/异地部署用）。
+- **sys.path 必须常驻**：模块互相用裸名 import，且 `search_engine.policy_order`
+  里有函数内惰性 import，所以适配层把包目录插在 `sys.path[0]` 后不能撤。
+  因为 M3 用的是 `src/chess_ai` 命名空间包，两者不冲突（有共存用例兜底）。
+- **线程数（关键）**：本机 20 逻辑核上 torch 默认开满会让 19×8×8 的微型 CNN 慢 450 倍
+  （评估 0.119ms → 54.5ms，2 秒只够 depth 1）。适配层默认压到 4 线程
+  （与上游 `play_v4.py` 一致），`threads` 参数可调，`None` 表示不动全局设置。
+  这是进程级全局设置，服务进程里 T/R/S/M3 都跑 GPU、不受影响。
+- **CPU 引擎**：不需要 CUDA（`FastEvaluator` 反而要求 CPU 模型）。
+- **每会话一份评估器**：`FastEvaluator` 复用输入缓冲区、上游文档明言不可并发共用，
+  因此权重进程级共享，但 `TracedEvaluator` 与搜索树每会话各一份。
+- **`eval` 恒为 None**：前端只渲染 WDL 字典，而 M2 只有一个 tanh 标量，
+  不伪造分布；原生分（白方视角，行棋方视角取负）放在 `state()['value_tanh']`。
+- 搜索是**时间预算 + 深度上限**（不是模拟数）：`seconds` 为硬墙、`depth` 为迭代加深
+  上限，`qdepth` 是静态搜索深度。`claim_draw=True` 时上游可能回报"建议申领和棋"
+  而不是走法，此时适配层显式报错（服务层 classify 本就把可申领和棋判终局）。
+- 已知边界：上游 README 自称"v4 原版稳定基线"，未跑完整对局与性能扫描，Elo 未知。
+
 ## 当前状态
 
-`T`、`R`、`S`、`M3` 均已接入并可对局（API 报告 `available`）。
+`T`、`R`、`S`、`M3`、`M2` 均已接入并可对局（API 报告 `available`）。
 
 ## 已归档内容（2026-09-20 审查后移除，勿再 Serve）
 
