@@ -103,8 +103,8 @@ python app.py --host 127.0.0.1 --port 8000
 | `T` | 符号链接 → `/home/jeefy/UniChess/Transformer`（Transformer 项目真实引擎，跨会话共享权重单例） | available，预设 `max_mcts`, `max_t` |
 | `R` | 符号链接 → `/home/jeefy/UniChess/ResNet`（ResNet 项目引擎） | available，预设 `policy`, `fast`, `max_mcts`, `cpu` |
 | `S` | 符号链接 → `/home/jeefy/UniChess/SSM`（状态序列模型主线，stage B 自对弈 RL） | available，预设 `champion` |
-| `M3` | 符号链接 → `/home/jeefy/UniChess/M3`（上游冻结可玩包：`src/chess_ai` 30M finalist + `NeuralMCTS`，3,695,244 参数 / 14.8MB 权重） | available，预设 `default`, `preview` |
-| `M2` | 真实目录 `models/M2/`（适配层）+ `/home/jeefy/UniChess/M2`（上游 chess_ai neural v2.0.0 原包：策略网 `ChessCNN` + 价值网 `ResidualValueModel` + negamax/PUCT 搜索） | available，预设 `default`, `fast`, `deep` |
+| `M3` | 符号链接 → `/home/jeefy/UniChess/M3`（上游冻结可玩包：`src/chess_ai` 30M finalist + `NeuralMCTS`，3,695,244 参数 / 14.8MB 权重） | available，预设 `default`, `preview`, `policy` |
+| `M2` | 真实目录 `models/M2/`（适配层）+ `/home/jeefy/UniChess/M2`（上游 chess_ai neural v2.0.0 原包：策略网 `ChessCNN` + 价值网 `ResidualValueModel` + negamax/PUCT 搜索） | available，预设 `default`, `fast`, `deep`, `policy` |
 
 命名约定：模型名保持简短（`T` 而非 `transformer`，`R` 而非 `resnet`），避免冗长；接入新项目时用符号链接 + 简短名，例如 `ln -s /home/jeefy/UniChess/ResNet models/R`。旧有的占位桩目录（`models/transformer/`、`models/resnet/`）已被对应的符号链接取代并清理。
 
@@ -165,9 +165,22 @@ M3 对应的是**上游冻结产物**（上游模型名 M6 30M finalist，注册
   而不是走法，此时适配层显式报错（服务层 classify 本就把可申领和棋判终局）。
 - 已知边界：上游 README 自称"v4 原版稳定基线"，未跑完整对局与性能扫描，Elo 未知。
 
+### 给模型加/改预设：config.json 与 *.local.json
+
+每个模型的预设来自两处，后者覆盖前者（同名预设按字段合并）：
+
+1. `models/<模型名>/config.json` —— 模型自带。**软链进来的冻结包不要改这里**：
+   M3/R/S/T 的 config.json 被包内 `SHA256SUMS` 罩着，改一个字节完整性自检就红，
+   也丢了"与上游一致"的凭证。
+2. `models/<模型名>.local.json` —— **仓库内的覆盖文件**，跟 git 走、不进上游包。
+
+`list_presets()` / `resolve_kwargs()` / `describe_model()` 三处都会自动合并，
+所以 `/api/models` 与 `/api/new?arg_name=…` 直接就能看到覆盖后的预设。
+M3 的 `policy` 档就是这么加的（`models/M3.local.json`）。
+
 ## 当前状态
 
-`T`、`R`、`S`、`M3`、`M2` 均已接入并可对局（API 报告 `available`）。
+`T`、`R`、`S`、`M3`、`M2` 均已接入并可对局（API 报告 `available`），其中 M2、M3 各有一个 `policy`（仅策略网）档。
 
 ## 已归档内容（2026-09-20 审查后移除，勿再 Serve）
 

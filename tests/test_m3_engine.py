@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import pathlib
 import sys
 import unittest
@@ -30,6 +31,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import models as model_registry  # noqa: E402
 import session_manager as sm  # noqa: E402
+import chess  # noqa: E402
 
 M3_DIR = pathlib.Path(__file__).resolve().parent.parent / 'models' / 'M3'
 M3_ARTIFACT = M3_DIR / 'weights' / 'm6-3p6m-30m-inference.pt'
@@ -133,6 +135,53 @@ class TestM3Discovery(unittest.TestCase):
             if h != digest.strip():
                 bad.append(f'{name}: 校验和不符')
         self.assertEqual(bad, [], '包完整性校验失败')
+
+    def test_policy_preset_resolves_to_minimum_simulation(self):
+        """policy 预设 = 冻结包的 simulations 下限 1（根节点选择由策略先验主导）。"""
+        kwargs = model_registry.resolve_kwargs('M3', 'policy')
+        self.assertEqual(kwargs['simulations'], 1)
+        self.assertEqual(kwargs['eval_batch_size'], 8)
+        self.assertTrue(kwargs['reuse_tree'])
+        self.assertEqual(kwargs['c_puct'], 1.5)
+        self.assertNotIn('description', kwargs)
+
+    def test_local_overlay_keeps_frozen_config_intact(self):
+        """policy 预设走 models/M3.local.json 覆盖，冻结包的 config.json 不得被改。"""
+        import hashlib
+        sums = M3_DIR / 'SHA256SUMS'
+        if not sums.is_file():
+            self.skipTest('包内 SHA256SUMS 不存在')
+        digest = None
+        for line in sums.read_text(encoding='utf-8').splitlines():
+            if line.strip().endswith('config.json'):
+                digest = line.split(None, 1)[0].strip()
+        self.assertIsNotNone(digest, 'SHA256SUMS 里没有 config.json 条目')
+        actual = hashlib.sha256((M3_DIR / 'config.json').read_bytes()).hexdigest()
+        self.assertEqual(actual, digest,
+                         '冻结包 config.json 被改过：预设应写在 models/M3.local.json')
+        overlay = M3_DIR.parent / 'M3.local.json'
+        self.assertTrue(overlay.is_file(), 'models/M3.local.json 应随仓库提供')
+        presets = json.loads(overlay.read_text(encoding='utf-8'))
+        self.assertIn('policy', presets)
+
+    @unittest.skipUnless(_cuda_available(), 'CUDA 不可用')
+    def test_policy_preset_plays_legal_move(self):
+        """1 次模拟下也必须给出合法着法（不需要多强，但不能非法/不能卡住）。"""
+        with mock.patch.object(
+            model_registry, 'resolve_kwargs', return_value={'simulations': 1}
+        ):
+            engine = model_registry.create_engine('M3', None)
+        try:
+            engine.setup()
+            board = chess.Board()
+            for uci in ('e2e4', 'g1f3'):
+                engine.human_move(uci)                 # 引擎只落子，不等它应答
+                board.push(chess.Move.from_uci(uci))
+                move = engine.engine_move()['engine_move']
+                self.assertIn(move, [m.uci() for m in board.legal_moves])
+                board.push(chess.Move.from_uci(move))
+        finally:
+            engine.cleanup()
 
     @unittest.skipUnless(_cuda_available(), 'CUDA 不可用')
     def test_constructor_defaults_are_strongest_code_default(self):

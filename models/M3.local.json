@@ -1,0 +1,10 @@
+{
+  "policy": {
+    "device": "auto",
+    "simulations": 1,
+    "eval_batch_size": 8,
+    "reuse_tree": true,
+    "c_puct": 1.5,
+    "description": "仅 policy：1 次模拟（冻结包的 simulations 下限就是 1），根节点选择几乎完全由策略先验决定、只带一次价值评估做次序打破。最弱也最快。"
+  }
+}

@@ -19,5 +19,9 @@
     "qdepth": 6,
     "claim_draw": true,
     "description": "强档：每步至多 5 秒、深度 6，即上游 CLI 的默认预算。"
+  },
+  "policy": {
+    "policy_only": true,
+    "description": "仅 policy：只取策略网排序首位，不进 negamax/静态搜索，亚毫秒级；也不加载价值网（故没有 eval 分数）。最弱也最快。"
   }
 }

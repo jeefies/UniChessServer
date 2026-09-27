@@ -7,8 +7,8 @@
 - Python：`/home/jeefy/miniconda3/envs/unichess/bin/python`（无 pytest，全部用标准库 `unittest`）
 - 无 `pyproject.toml` / `requirements.txt` / CI：直接 `python app.py` 运行
 - 启动：`python app.py --host 127.0.0.1 --port 8000`（仅接受 `--host/--port`）
-- 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；98 项，
-  其中 M3 16 项 / M2 21 项）。Windows 本机有 3 项因符号链接权限必失败
+- 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；104 项，
+  其中 M3 19 项 / M2 24 项）。Windows 本机有 3 项因符号链接权限必失败
   （与 M2/M3 无关），远端全绿
 - 远端部署：systemd 用户级服务 `unichess-server.service` + `unichess-tunnel.service`
 - 接口清单与模型插件契约见 `README.md`（刷新区块务必同步两份）
@@ -48,6 +48,11 @@
   适配层默认压 4 线程（进程级全局，GPU 引擎不受影响）；② `FastEvaluator`
   复用输入缓冲区不可并发共用，权重共享但评估器/搜索树每会话一份。
 - M2 的 `eval` 恒为 None（只有 tanh 标量、不伪造 WDL），原生分在 `value_tanh`。
+- M2/M3 各有一个 `policy` 档：M2 是真·仅策略（`policy_only=true`，不进搜索、
+  不加载价值网，约 1ms/步）；M3 只能把 `simulations` 压到冻结包下限 1（约 40–65ms/步）。
+- **软链进来的冻结包不要改它的 `config.json`**（被包内 SHA256SUMS 罩着）：
+  加/改预设写 `models/<模型名>.local.json`，`_load_config` 会把两处按预设名合并，
+  `list_presets`/`resolve_kwargs`/`describe_model` 都会看到合并结果。
 - M3 的 `engine.py` 只认 `simulations`/`eval_batch_size`/`reuse_tree`/`c_puct`/`device`
   五个参数（无 `ckpt`，权重路径包内硬编码），`state()` 的 `eval` 是白方视角 WDL 字典
 - M3 的 `state()` 用 `en_passant="fen"`（双步进兵后总写给区格），服务层 `state()` 用

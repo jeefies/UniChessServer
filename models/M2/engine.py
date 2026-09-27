@@ -126,36 +126,47 @@ def _device() -> torch.device:
     return torch.device('cpu')
 
 
-def _shared_models():
-    """进程级共享：策略网与价值网各加载一次（只读前向，可跨会话共用）。"""
-    key = f'{_PACKAGE_ROOT}|cpu'
+def _shared_policy():
+    """进程级共享策略网（只读前向，可跨会话共用）。"""
+    key = f'policy|{_PACKAGE_ROOT}|cpu'
     with _cache_lock:
         cached = _model_cache.get(key)
         if cached is not None:
             return cached
         device = _device()
         policy_path = _PACKAGE_ROOT / POLICY_WEIGHTS
-        value_path = _value_weights()
         _verify_once(policy_path, POLICY_SHA256)
-        _verify_once(value_path, VALUE_SHA256)
-
         policy = ChessCNN().to(device)
         policy.load_state_dict(
             torch.load(policy_path, map_location=device, weights_only=True)
         )
         policy.eval()
+        _model_cache[key] = policy
+        return policy
+
+
+def _shared_value():
+    """进程级共享价值网；只有真正需要评估时才加载（policy_only 用不到）。"""
+    key = f'value|{_PACKAGE_ROOT}|cpu'
+    with _cache_lock:
+        cached = _model_cache.get(key)
+        if cached is not None:
+            return cached
+        device = _device()
+        value_path = _value_weights()
+        _verify_once(value_path, VALUE_SHA256)
         value = ResidualValueModel().to(device)
         value.load_state_dict(
             torch.load(value_path, map_location=device, weights_only=True)
         )
         value.eval()
-        _model_cache[key] = (policy, value)
-        return _model_cache[key]
+        _model_cache[key] = value
+        return value
 
 
-def _new_evaluator(value_model) -> TracedEvaluator:
+def _new_evaluator():
     """每会话一份评估器：FastEvaluator 复用输入缓冲区，不可并发共用。"""
-    evaluator = TracedEvaluator(value_model)
+    evaluator = TracedEvaluator(_shared_value())
     evaluator.validate([chess.Board()])
     return evaluator
 
@@ -167,7 +178,7 @@ class GameEngine:
     NOT_IMPLEMENTED_REASON: str = ''
 
     def __init__(self, **kwargs: Any) -> None:
-        allowed = {'seconds', 'depth', 'qdepth', 'claim_draw', 'threads'}
+        allowed = {'seconds', 'depth', 'qdepth', 'claim_draw', 'threads', 'policy_only'}
         unknown = sorted(set(kwargs) - allowed)
         if unknown:
             raise TypeError(f'unsupported M2 engine kwargs: {unknown}')
@@ -175,6 +186,7 @@ class GameEngine:
         self.depth = int(kwargs.get('depth', 5))
         self.qdepth = int(kwargs.get('qdepth', 6))
         self.claim_draw = bool(kwargs.get('claim_draw', True))
+        self.policy_only = bool(kwargs.get('policy_only', False))
         self.threads = kwargs.get('threads', DEFAULT_THREADS)
         if self.threads is not None and not 1 <= int(self.threads) <= 16:
             raise ValueError('threads 必须在 1～16 内（或 None 表示不动全局线程设置）')
@@ -185,9 +197,11 @@ class GameEngine:
 
         _apply_threads(self.threads)
         self._device = _device()
-        self._policy, self._value = _shared_models()
-        self._evaluator = _new_evaluator(self._value)
-        self._search = NeuralSearchV4(
+        self._policy = _shared_policy()
+        # policy_only 不需要价值网，也省掉每次会话的 jit trace
+        self._value = None if self.policy_only else _shared_value()
+        self._evaluator = None if self.policy_only else _new_evaluator()
+        self._search = None if self.policy_only else NeuralSearchV4(
             self._evaluator,
             self.seconds,
             self.depth,
@@ -207,7 +221,10 @@ class GameEngine:
         return policy_order(self._board, self._policy, self._device)
 
     def _refresh_eval(self) -> None:
-        """缓存当前局面的原生评估（行棋方视角 tanh），供 UI 取用。"""
+        """缓存当前局面的原生评估（行棋方视角 tanh），供 UI 取用。
+
+        policy_only 不建评估器（省掉 jit trace），此时没有分数。
+        """
         if self._evaluator is None:
             self._state_eval = None
             return
@@ -232,13 +249,14 @@ class GameEngine:
             else:
                 raise TypeError(f'fen must be str or None, got {type(fen).__name__}')
             self._board = board
-            self._search = NeuralSearchV4(
-                self._evaluator,
-                self.seconds,
-                self.depth,
-                qdepth=self.qdepth,
-                claim_draw=self.claim_draw,
-            )
+            if not self.policy_only:
+                self._search = NeuralSearchV4(
+                    self._evaluator,
+                    self.seconds,
+                    self.depth,
+                    qdepth=self.qdepth,
+                    claim_draw=self.claim_draw,
+                )
             self._san_history = []
             self._move_records = []
             self._refresh_eval()
@@ -268,15 +286,24 @@ class GameEngine:
                 raise ValueError('cannot choose an engine move from a terminal position')
             started = time.perf_counter()
             preferred = self._policy_order()
-            move, is_mate, stats = self._search.choose(self._board, preferred)
+            if self.policy_only or self._search is None:
+                # 仅 policy：直接取策略网排序首位，不进 negamax/静态搜索
+                move = preferred[0]
+                is_mate = False
+                nodes = 0
+                depth = 0
+            else:
+                move, is_mate, stats = self._search.choose(self._board, preferred)
+                nodes = int(stats.get('nodes', 0))
+                depth = int(stats.get('depth', 0))
+                if move is None:
+                    # claim_draw=True 时上游可能回报「建议申领和棋」而非走法。
+                    # 服务层 classify 已把可申领和棋判为终局，正常不会走到这里；
+                    # 万一走到，显式报错，绝不返回假走法。
+                    raise ValueError('M2 认为当前局面应申领和棋，未给出走法')
             elapsed_ms = (time.perf_counter() - started) * 1000.0
-            if move is None:
-                # claim_draw=True 时上游可能回报「建议申领和棋」而非走法。
-                # 服务层 classify 已把可申领和棋判为终局，正常不会走到这里；
-                # 万一走到，显式报错，绝不返回假走法。
-                raise ValueError('M2 认为当前局面应申领和棋，未给出走法')
             if move not in self._board.legal_moves:
-                raise RuntimeError(f'MCTS returned an illegal move: {move.uci()}')
+                raise RuntimeError(f'returned an illegal move: {move.uci()}')
             san = self._board.san(move)
             uci = move.uci()
             self._board.push(move)
@@ -286,16 +313,16 @@ class GameEngine:
                 'san': san,
                 'actor': 'engine',
                 'engine_ms': elapsed_ms,
-                'nodes': int(stats.get('nodes', 0)),
-                'depth': int(stats.get('depth', 0)),
+                'nodes': nodes,
+                'depth': depth,
             })
             self._refresh_eval()
             return {
                 'engine_move': uci,
                 'mate': bool(is_mate),
                 'engine_ms': elapsed_ms,
-                'nodes': int(stats.get('nodes', 0)),
-                'depth': int(stats.get('depth', 0)),
+                'nodes': nodes,
+                'depth': depth,
                 'state': self.state(),
             }
 
@@ -344,6 +371,7 @@ class GameEngine:
 
     def cleanup(self):
         with self._lock:
+            self._search = None
             self._move_records = []
             self._san_history = []
             self._state_eval = None

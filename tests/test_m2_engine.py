@@ -23,6 +23,8 @@ import sys
 import unittest
 from unittest import mock
 
+import chess  # noqa: E402
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import models as model_registry  # noqa: E402
@@ -114,6 +116,13 @@ class TestM2Discovery(unittest.TestCase):
         for preset in ('default', 'fast', 'deep'):
             kwargs = model_registry.resolve_kwargs('M2', preset)
             self.assertNotIn('description', kwargs)
+
+    def test_policy_preset_resolves(self):
+        """policy 预设只开 policy_only，不带搜索预算参数。"""
+        kwargs = model_registry.resolve_kwargs('M2', 'policy')
+        self.assertTrue(kwargs['policy_only'])
+        self.assertNotIn('description', kwargs)
+        self.assertEqual(sorted(kwargs), ['policy_only'])
 
     def test_package_weights_match_upstream_readme(self):
         """两个权重必须与上游 README 声明的 SHA-256 一致。"""
@@ -284,6 +293,58 @@ class TestM2Contract(unittest.TestCase):
         self.addCleanup(engine.cleanup)
         import torch
         self.assertEqual(torch.get_num_threads(), 4)
+
+    def test_policy_only_skips_search_and_value_net(self):
+        """policy 档：不建评估器、不加载价值网，着法仍合法且 nodes/depth 为 0。"""
+        engine = model_registry._load_engine_class('M2')(
+            policy_only=True, seconds=0.5, depth=4
+        )
+        self.addCleanup(engine.cleanup)
+        self.assertTrue(engine.policy_only)
+        self.assertIsNone(engine._evaluator)
+        self.assertIsNone(engine._search)
+        self.assertIsNone(engine._value)
+        state = engine.setup()
+        self.assertIsNone(state['value_tanh'])
+        self.assertIsNone(state['eval'])
+
+        board = chess.Board()
+        for uci in ('e2e4', 'g1f3'):
+            engine.human_move(uci)                      # 引擎只落子，不等它应答
+            board.push(chess.Move.from_uci(uci))
+            result = engine.engine_move()
+            move = result['engine_move']
+            self.assertIn(move, [m.uci() for m in board.legal_moves])
+            board.push(chess.Move.from_uci(move))
+            self.assertEqual(result['nodes'], 0)
+            self.assertEqual(result['depth'], 0)
+        # 没有搜索就没有评估分，但形状字段仍在
+        state = engine.state()
+        self.assertIsNone(state['value_tanh'])
+        self.assertIsNone(state['eval'])
+
+    def test_policy_preset_keeps_value_net_lazy(self):
+        """同进程里：policy 会话不碰价值网，随后普通会话仍能正常加载并使用。"""
+        cheap = model_registry._load_engine_class('M2')(policy_only=True)
+        try:
+            self.assertIsNone(cheap._value)
+            cheap.setup()
+            cheap.human_move('d2d4')
+            self.assertTrue(cheap.engine_move()['engine_move'])
+            normal = model_registry._load_engine_class('M2')(**_tiny_kwargs())
+            try:
+                self.assertIsNotNone(normal._value)
+                self.assertIsNotNone(normal._evaluator)
+                normal.setup()
+                normal.human_move('e2e4')
+                result = normal.engine_move()
+                self.assertTrue(result['engine_move'])
+                self.assertGreater(result['nodes'], 0)
+                self.assertIsInstance(result['state']['value_tanh'], float)
+            finally:
+                normal.cleanup()
+        finally:
+            cheap.cleanup()
 
 
 @unittest.skipUnless(

@@ -159,6 +159,17 @@ def _load_engine_class(model_name: str) -> type:
     return engine_cls
 
 
+def _local_config_path(model_name: str) -> pathlib.Path:
+    """模型预设的**仓库内覆盖文件**：models/<model_name>.local.json。
+
+    为什么需要它：`models/<name>` 常常是指向外部项目的软链（M3/R/S/T），
+    而这类冻结包的 config.json 被包内 SHA256SUMS 罩着，改一个字节就会让
+    完整性自检失败、也弄丢"与上游一致"的凭证。想给冻结包加/改预设，
+    就写这个文件——它跟仓库走，不进上游包。
+    """
+    return MODELS_DIR / f'{model_name}.local.json'
+
+
 def _load_config(model_name: str) -> dict[str, dict[str, Any]]:
     if model_name in _config_cache:
         return _config_cache[model_name]
@@ -170,12 +181,25 @@ def _load_config(model_name: str) -> dict[str, dict[str, Any]]:
         with config_path.open('r', encoding='utf-8') as f:
             config = json.load(f)
 
+    local_path = _local_config_path(model_name)
+    if local_path.is_file():
+        with local_path.open('r', encoding='utf-8') as f:
+            local = json.load(f)
+        for name, preset in local.items():
+            base = config.get(name)
+            if isinstance(base, dict) and isinstance(preset, dict):
+                merged = dict(base)
+                merged.update(preset)
+                config[name] = merged
+            else:
+                config[name] = preset
+
     _config_cache[model_name] = config
     return config
 
 
 def list_presets(model_name: str) -> list[str]:
-    """列出 models/{model_name}/config.json 中的可用预设名（arg_name）。"""
+    """列出模型的可用预设名（config.json + <model_name>.local.json 覆盖）。"""
     return sorted(_load_config(model_name).keys())
 
 
