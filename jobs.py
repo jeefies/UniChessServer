@@ -3,7 +3,7 @@
 取代旧的 batch_runner.py（进程内 4 线程）与 arena_manager.py（进程内双引擎单步）：
 
 - 引擎解析：GameEngine 声明了 ``KIT_FACTORY`` 的走 kit 原生 Player（跨局攒批，1 进程 8 并发）；
-  否则用 ``Kit.serving:game_engine_player_factory`` 包装六方法引擎（T 的 C++ MCTS、M6），
+  否则用 ``Kit.serving:game_engine_player_factory`` 包装六方法引擎（T 的 C++ MCTS、M3），
   每个 worker 进程一局，4 进程并行。
 - job 目录 ``data/jobs/<id>/``：job.json / status.json / live.json / results.jsonl / job.log。
   Server 只读这些文件，不与 job 进程通信；服务重启后凭目录接管或收尾（进程已死 = interrupted）。

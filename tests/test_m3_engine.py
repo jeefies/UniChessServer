@@ -1,8 +1,8 @@
-"""M6 引擎接入验收测试。
+"""M3 引擎接入验收测试。
 
 覆盖：
-1. 模型发现与状态上报（models/M6 符号链接可用，预设可解析）
-2. 默认配置即 M6 代码默认配置中最强一档（64 模拟 / 批量 8 / 树复用）
+1. 模型发现与状态上报（models/M3 符号链接可用，预设可解析）
+2. 默认配置即上游 M6 模型代码默认配置中最强一档（64 模拟 / 批量 8 / 树复用）
 3. 六方法契约端到端（真实权重 + 极小模拟预算）
 4. 共享模型缓存：同 (artifact, device) 只加载一次，会话间共享权重但搜索树独立
 5. 包完整性：SHA256SUMS 与实际文件一致（部署后自检）
@@ -10,6 +10,7 @@
    state() 的 fen 以服务层权威 Board 为准
 
 2026-09-27 起对应上游冻结包 `M6-30M-UniChessServer-playable.zip`（30M finalist，
+模型在 Server 注册名为 `M3`，包内文件名与 SHA 仍是上游原样，勿改）：
 `src/chess_ai/` 布局 + `weights/m6-3p6m-30m-inference.pt`）。该包不可改动，
 因此本文件的断言只能依据它的**公开契约**：六方法、config.json 预设、
 `state()` 字段与 `engine.py` 模块级缓存钩子。
@@ -30,12 +31,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import models as model_registry  # noqa: E402
 import session_manager as sm  # noqa: E402
 
-M6_DIR = pathlib.Path(__file__).resolve().parent.parent / 'models' / 'M6'
-M6_ARTIFACT = M6_DIR / 'weights' / 'm6-3p6m-30m-inference.pt'
+M3_DIR = pathlib.Path(__file__).resolve().parent.parent / 'models' / 'M3'
+M3_ARTIFACT = M3_DIR / 'weights' / 'm6-3p6m-30m-inference.pt'
 
 
-def _m6_available() -> bool:
-    return 'M6' in model_registry.available_models()
+def _m3_available() -> bool:
+    return 'M3' in model_registry.available_models()
 
 
 def _cuda_available() -> bool:
@@ -49,7 +50,7 @@ def _cuda_available() -> bool:
 def _tiny_kwargs() -> dict:
     """契约用例用的极小预算 kwargs（经 mock 注入 resolve_kwargs）。
 
-    新版 engine.py 只接受 simulations / eval_batch_size / reuse_tree / c_puct /
+    M3 的 engine.py 只接受 simulations / eval_batch_size / reuse_tree / c_puct /
     device 五个参数，权重路径由包内硬编码（它是冻结产物），不再有 ckpt 参数。
     """
     return {
@@ -68,48 +69,48 @@ def _engine_globals(engine):
     return type(engine).__init__.__globals__
 
 
-class TestM6Discovery(unittest.TestCase):
+class TestM3Discovery(unittest.TestCase):
     """模型发现层：不加载权重，只验证上报与预设解析。"""
 
     def setUp(self):
-        if not _m6_available():
-            self.skipTest('models/M6 符号链接未配置')
+        if not _m3_available():
+            self.skipTest('models/M3 符号链接未配置')
 
     def test_m6_reported_available(self):
-        info = model_registry.describe_model('M6')
+        info = model_registry.describe_model('M3')
         self.assertEqual(info['status'], 'available')
         self.assertIn('default', info['presets'])
         self.assertIn('preview', info['presets'])
 
     def test_default_preset_is_strongest_code_default(self):
-        """默认预设必须是 M6 代码默认配置中最强的一档。"""
-        kwargs = model_registry.resolve_kwargs('M6', 'default')
+        """默认预设必须是上游 M6 模型代码默认配置中最强的一档。"""
+        kwargs = model_registry.resolve_kwargs('M3', 'default')
         self.assertEqual(kwargs['simulations'], 64)
         self.assertEqual(kwargs['eval_batch_size'], 8)
         self.assertTrue(kwargs['reuse_tree'])
         self.assertEqual(kwargs['c_puct'], 1.5)
 
     def test_preview_preset_matches_shipped_defaults(self):
-        kwargs = model_registry.resolve_kwargs('M6', 'preview')
+        kwargs = model_registry.resolve_kwargs('M3', 'preview')
         self.assertEqual(kwargs['simulations'], 16)
         self.assertEqual(kwargs['eval_batch_size'], 8)
         self.assertTrue(kwargs['reuse_tree'])
 
     def test_unknown_preset_rejected(self):
         with self.assertRaises(model_registry.ArgPresetNotFoundError):
-            model_registry.resolve_kwargs('M6', 'no_such_preset')
+            model_registry.resolve_kwargs('M3', 'no_such_preset')
 
     def test_bundle_artifact_present(self):
         """包内必须带推理权重，且 SHA256SUMS 的条目数与实际文件对得上。"""
-        self.assertTrue(M6_ARTIFACT.is_file(),
-                        f'缺少包内推理权重: {M6_ARTIFACT}')
-        lines = (M6_DIR / 'SHA256SUMS').read_text(encoding='utf-8').splitlines()
+        self.assertTrue(M3_ARTIFACT.is_file(),
+                        f'缺少包内推理权重: {M3_ARTIFACT}')
+        lines = (M3_DIR / 'SHA256SUMS').read_text(encoding='utf-8').splitlines()
         entries = [l for l in lines if l.strip()]
         self.assertTrue(entries, 'SHA256SUMS 为空')
         listed = {l.split(None, 1)[1].strip() for l in entries}
         actual = {
-            str(p.relative_to(M6_DIR)).replace('\\', '/')
-            for p in M6_DIR.rglob('*')
+            str(p.relative_to(M3_DIR)).replace('\\', '/')
+            for p in M3_DIR.rglob('*')
             if p.is_file() and '__pycache__' not in p.parts
             and p.name != 'SHA256SUMS'  # 清单不列自己
         }
@@ -120,11 +121,11 @@ class TestM6Discovery(unittest.TestCase):
     def test_bundle_integrity(self):
         """逐文件核验 SHA256SUMS：部署后自检，权重被换/截断立即暴露。"""
         bad = []
-        for line in (M6_DIR / 'SHA256SUMS').read_text(encoding='utf-8').splitlines():
+        for line in (M3_DIR / 'SHA256SUMS').read_text(encoding='utf-8').splitlines():
             if not line.strip():
                 continue
             digest, name = line.split(None, 1)
-            path = M6_DIR / name.strip()
+            path = M3_DIR / name.strip()
             if not path.is_file():
                 bad.append(f'{name}: 缺失')
                 continue
@@ -139,7 +140,7 @@ class TestM6Discovery(unittest.TestCase):
         with mock.patch.object(
             model_registry, 'resolve_kwargs', return_value={}
         ):
-            engine = model_registry.create_engine('M6', None)
+            engine = model_registry.create_engine('M3', None)
         try:
             self.assertEqual(engine.simulations, 64)
             self.assertEqual(engine.eval_batch_size, 8)
@@ -153,16 +154,16 @@ class TestM6Discovery(unittest.TestCase):
     @unittest.skipUnless(_cuda_available(), 'CUDA 不可用')
     def test_cpu_device_rejected(self):
         """包明确禁用 CPU 回退，device='cpu' 必须显式报错而不是悄悄退化。"""
-        engine_cls = model_registry._load_engine_class('M6')
+        engine_cls = model_registry._load_engine_class('M3')
         with self.assertRaises(ValueError):
             engine_cls(device='cpu')
 
 
 @unittest.skipUnless(
-    _m6_available() and _cuda_available(),
-    'models/M6 符号链接未配置或 CUDA 不可用',
+    _m3_available() and _cuda_available(),
+    'models/M3 符号链接未配置或 CUDA 不可用',
 )
-class TestM6Contract(unittest.TestCase):
+class TestM3Contract(unittest.TestCase):
     """六方法契约 + 服务层集成：真实权重 + 极小预算。"""
 
     def _make_session(self, engine_white=False, fen=None):
@@ -173,7 +174,7 @@ class TestM6Contract(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
-        session = manager.create('M6', 'default', fen, engine_white)
+        session = manager.create('M3', 'default', fen, engine_white)
         self.addCleanup(manager.close, session.session_id)
         return session
 

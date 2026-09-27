@@ -7,8 +7,8 @@
 - Python：`/home/jeefy/miniconda3/envs/unichess/bin/python`（无 pytest，全部用标准库 `unittest`）
 - 无 `pyproject.toml` / `requirements.txt` / CI：直接 `python app.py` 运行
 - 启动：`python app.py --host 127.0.0.1 --port 8000`（仅接受 `--host/--port`）
-- 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；77 项，其中 M6 16 项）。
-  Windows 本机有 3 项因符号链接权限必失败（与 M6 无关），远端全绿
+- 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；77 项，其中 M3 16 项）。
+  Windows 本机有 3 项因符号链接权限必失败（与 M6/M3 无关），远端全绿
 - 远端部署：systemd 用户级服务 `unichess-server.service` + `unichess-tunnel.service`
 - 接口清单与模型插件契约见 `README.md`（刷新区块务必同步两份）
 
@@ -35,14 +35,15 @@
   每个 worker 进程一局，4 进程并行
 - 新引擎接入：`ln -s /home/jeefy/UniChess/<项目> ~/UniChess/Server/models/<短名>`，
   并在 `config.json` 里配 preset
-- `models/M6` 是上游冻结包，**勿重构**：升级只能整体替换 `~/UniChess/M6`（zip 原件留在
-  `~/UniChess/.m6-backup-*/`，不在任何仓库里），替换后跑 `tests/test_m6_engine.py` 验收。
-  它没有 git 仓库，`Server/.gitignore` 用权重/压缩包规则挡住误提交
-- M6 的 `engine.py` 只认 `simulations`/`eval_batch_size`/`reuse_tree`/`c_puct`/`device`
+- `models/M3`（上游 M6 30M finalist 冻结包，勿重构）：升级只能整体替换
+  `~/UniChess/M3`（zip 原件留在 `~/UniChess/.m6-backup-20260927/`，不在任何仓库里），
+  替换后跑 `tests/test_m3_engine.py` 验收。它自己没有 git 仓库，
+  `Server/.gitignore` 用权重/压缩包规则挡住误提交
+- M3 的 `engine.py` 只认 `simulations`/`eval_batch_size`/`reuse_tree`/`c_puct`/`device`
   五个参数（无 `ckpt`，权重路径包内硬编码），`state()` 的 `eval` 是白方视角 WDL 字典
-- M6 的 `state()` 用 `en_passant="fen"`（双步进兵后总写给区格），服务层 `state()` 用
+- M3 的 `state()` 用 `en_passant="fen"`（双步进兵后总写给区格），服务层 `state()` 用
   python-chess 默认口径并**用自己的 fen 覆盖**，故前端看到的始终是服务层口径；
-  比对两边局面时比着法序列，别比 fen 字符串（`test_m6_engine._histories`）
+  比对两边局面时比着法序列，别比 fen 字符串（`test_m3_engine._histories`）
 
 ## 观战揭示的一个不变量（踩过坑）
 
@@ -71,7 +72,7 @@ worker 是先追加着法再补 detail 的，只等着法就揭示会让前端�
 
 每次重启 server 后，**第一次**开 S 对局会返回 522：该进程内首次要 import torch/mamba、
 加载 101MB 的 champion.pt、跑 triton autotune，本地实测约 60s，超过 Cloudflare 的代理预算
-（T/M6 轻得多，重启后 1.6–2.0s 就回）。热路径正常：建局 2.9–4.5s、每步 <0.2s。
+（T/M3 轻得多，重启后 1.6–2.0s 就回）。热路径正常：建局 2.9–4.5s、每步 <0.2s。
 
 **2026-09-27 决定不做启动预热**：预热会让服务启动多背约 3s 和常驻 2.8G 显存，
 且已明确不改 S 的加载方式。若哪天要消除这个 522，唯一该做的改法是启动时预热一次
