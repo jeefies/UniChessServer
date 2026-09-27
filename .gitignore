@@ -1,3 +1,11 @@
+# 模型权重与引擎分发包（公网仓库禁入，原件留在 ~/UniChess/.m6-backup*/）
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.zst
+*.zip
+
 # 运行时产物
 logs/
 __pycache__/

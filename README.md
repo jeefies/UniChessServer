@@ -100,24 +100,39 @@ python app.py --host 127.0.0.1 --port 8000
 
 | 模型名 | 实现 | 状态 |
 |---|---|---|
-| `T` | 符号链接 → `/home/jeefy/UniChess/Transformer`（Transformer 项目真实引擎，跨会话共享权重单例） | available，预设 `max_mcts` |
+| `T` | 符号链接 → `/home/jeefy/UniChess/Transformer`（Transformer 项目真实引擎，跨会话共享权重单例） | available，预设 `max_mcts`, `max_t` |
 | `R` | 符号链接 → `/home/jeefy/UniChess/ResNet`（ResNet 项目引擎） | available，预设 `policy`, `fast`, `max_mcts`, `cpu` |
-| `M6` | 符号链接 → `/home/jeefy/UniChess/M6`（M6 预览包：`chess_ai` 1M 监督 Transformer + `NeuralMCTS`，约 2.7M 参数 / 10MB 权重） | available，预设 `default`, `preview` |
+| `S` | 符号链接 → `/home/jeefy/UniChess/SSM`（状态序列模型主线，stage B 自对弈 RL） | available，预设 `champion`, `champion_server` |
+| `M6` | 符号链接 → `/home/jeefy/UniChess/M6`（上游冻结可玩包：`src/chess_ai` 30M finalist + `NeuralMCTS`，3,695,244 参数 / 14.8MB 权重） | available，预设 `default`, `preview` |
 
 命名约定：模型名保持简短（`T` 而非 `transformer`，`R` 而非 `resnet`），避免冗长；接入新项目时用符号链接 + 简短名，例如 `ln -s /home/jeefy/UniChess/ResNet models/R`。旧有的占位桩目录（`models/transformer/`、`models/resnet/`）已被对应的符号链接取代并清理。
 
 ### M6 引擎说明
 
-- 部署物：`chess_ai_M6_preview_windows_v3.zip`（Windows x64 源码 + CPU 推理权重包），已解压到 `/home/jeefy/UniChess/M6` 并按 `SHA256SUMS.txt` 逐文件核验（26/26 通过），`Server/models/M6` 以符号链接接入。
-- 适配层：`/home/jeefy/UniChess/M6/engine.py`，实现 GameEngine 六方法契约；包内模块全部命名空间在 `chess_ai` 之下，与 T/R 的裸顶层包名（`core`/`model`/`search`...）无冲突，不需要 `sys.modules` 隔离。
-- **仅 GPU 推理**：`device` 只接受 `cuda`/`auto`，CUDA 不可用直接报错，不提供 CPU 回退（CPU 上一次搜索要数秒，无法用于对弈服务）。
-- **默认配置即 M6 代码默认配置中最强一档**：`simulations=64`（`chess_ai/search/mcts.py` 的 `MCTSConfig` 默认值，代码中最大的默认模拟预算）、`eval_batch_size=8` 与 `reuse_tree=True`（`play_preview.py` 的生产默认）、`c_puct=1.5`。GPU 上约 0.1s/步。`preview` 预设是原 Windows 包的 16 模拟演示档位。
-- 权重按 `(ckpt, device)` 进程级共享（约 24MB 显存），每个会话持有独立的 `NeuralMCTS` 搜索树；`cleanup()` 只释放会话级搜索树。
-- 已知边界：预览版权重来自 1M 样本监督基线（未测 Elo），包内自带 SHA-256 基线可选核验（构造参数 `require_source_sha256`）。
+M6 是**上游冻结产物**，不由本目录维护：升级 = 用新发布的可玩包整体替换 `/home/jeefy/UniChess/M6`
+（不合并、不改代码），替换后跑 `tests/test_m6_engine.py` 做接入验收。
+
+- 部署物：`M6-30M-UniChessServer-playable.zip`，解压到 `/home/jeefy/UniChess/M6` 并按包内
+  `SHA256SUMS` 逐文件核验（25/25 通过），`Server/models/M6` 以符号链接接入。
+  zip 本身含 `.pt` 权重，**不放仓库**（已加 `.gitignore`），原件留在 `~/UniChess/.m6-backup-*/`。
+- 包结构：`engine.py`（适配层）+ `src/chess_ai/`（网络与推理闭包）+ `weights/`（单一推理权重）
+  + `config.json` + `SHA256SUMS`。`engine.py` 自己把 `src/` 插进 `sys.path`，
+  因此引入的是 `chess_ai.*`，与 T/R 的裸顶层包名（`core`/`model`/`search`...）无冲突。
+- 适配层实现 GameEngine 六方法契约；构造只接受 `simulations` / `eval_batch_size` /
+  `reuse_tree` / `c_puct` / `device` 五个参数，**没有 `ckpt` 参数**（权重路径包内硬编码，
+  换权重只能换包）。`state()` 的 `eval` 是白方视角 WDL 字典（`{win,draw,loss,pov}`），
+  终局为 `None`。
+- **仅 GPU 推理**：`device` 只接受 `cuda`/`auto`/`cuda:0`，CUDA 不可用直接报错，不提供 CPU 回退。
+- **默认配置即 M6 代码默认配置中最强一档**：`simulations=64`、`eval_batch_size=8`、
+  `reuse_tree=True`、`c_puct=1.5`。GPU 上约 0.1–0.2s/步。`preview` 是 16 模拟演示档位。
+- 权重按 `(artifact, device)` 进程级共享（约 24MB 显存），每个会话持有独立的 `NeuralMCTS`
+  搜索树；`cleanup()` 只释放会话级搜索树。
+- 已知边界：包只做人机对弈适配，不带开局库/UCI/时间控制/批量优化；上游未跑完整对局与
+  性能扫描，Elo 未知。
 
 ## 当前状态
 
-`T`、`R`、`M6` 均已接入并可对局（API 报告 `available`）。
+`T`、`R`、`S`、`M6` 均已接入并可对局（API 报告 `available`）。
 
 ## 已归档内容（2026-09-20 审查后移除，勿再 Serve）
 
