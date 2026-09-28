@@ -54,13 +54,13 @@ class TestDSDiscovery(unittest.TestCase):
 
     def test_default_preset(self):
         kwargs = model_registry.resolve_kwargs('DS', 'default')
-        self.assertEqual(kwargs['timeout_s'], 30)
+        self.assertEqual(kwargs['timeout_s'], 300)
         self.assertEqual(kwargs['max_attempts'], 2)
         self.assertTrue(kwargs['thinking'])
 
     def test_fast_preset(self):
         kwargs = model_registry.resolve_kwargs('DS', 'fast')
-        self.assertEqual(kwargs['timeout_s'], 10)
+        self.assertEqual(kwargs['timeout_s'], 60)
         self.assertFalse(kwargs['thinking'])
 
     def test_unknown_preset_rejected(self):
@@ -92,7 +92,7 @@ class TestDSContract(unittest.TestCase):
         with mock.patch.object(model_registry, 'resolve_kwargs', return_value={}):
             engine = model_registry.create_engine('DS', None)
         try:
-            self.assertEqual(engine.timeout_s, 30.0)
+            self.assertEqual(engine.timeout_s, 300.0)
             self.assertEqual(engine.max_attempts, 2)
             self.assertEqual(engine.temperature, 0.2)
             self.assertTrue(engine.thinking)
