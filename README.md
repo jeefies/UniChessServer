@@ -105,6 +105,7 @@ python app.py --host 127.0.0.1 --port 8000
 | `S` | 符号链接 → `/home/jeefy/UniChess/SSM`（状态序列模型主线，stage B 自对弈 RL） | available，预设 `champion` |
 | `M3` | 符号链接 → `/home/jeefy/UniChess/M3`（上游冻结可玩包：`src/chess_ai` 30M finalist + `NeuralMCTS`，3,695,244 参数 / 14.8MB 权重） | available，预设 `default`, `preview`, `policy` |
 | `M2` | 真实目录 `models/M2/`（适配层）+ `/home/jeefy/UniChess/M2`（上游 chess_ai neural v2.0.0 原包：策略网 `ChessCNN` + 价值网 `ResidualValueModel` + negamax/PUCT 搜索） | available，预设 `default`, `fast`, `deep`, `policy` |
+| `DS` | 真实目录 `Server/models/DS/`（`DS/` 仓库百炼 OpenAI 兼容端点大模型引擎，`.env` 存密钥） | available，预设 `default`, `fast` |
 
 命名约定：模型名保持简短（`T` 而非 `transformer`，`R` 而非 `resnet`），避免冗长；接入新项目时用符号链接 + 简短名，例如 `ln -s /home/jeefy/UniChess/ResNet models/R`。旧有的占位桩目录（`models/transformer/`、`models/resnet/`）已被对应的符号链接取代并清理。
 
@@ -164,6 +165,28 @@ M3 对应的是**上游冻结产物**（上游模型名 M6 30M finalist，注册
   上限，`qdepth` 是静态搜索深度。`claim_draw=True` 时上游可能回报"建议申领和棋"
   而不是走法，此时适配层显式报错（服务层 classify 本就把可申领和棋判终局）。
 - 已知边界：上游 README 自称"v4 原版稳定基线"，未跑完整对局与性能扫描，Elo 未知。
+
+### DS 引擎说明
+
+DS 是**仓库内实现**的大模型引擎，不依赖本地权重文件，靠 `.env` 读取阿里云百炼
+（OpenAI 兼容端点）配置：
+
+- 接入仓库：`jeefies/UniChessLLM`（本地目录 `DS/`），`Server/models/DS` 以符号链接
+  指向 `~/UniChess/DS`。
+- 依赖：仅标准库 `urllib` + `chess`；**不新增任何依赖**。
+- 构造参数白名单：`model / timeout_s / max_attempts / temperature / max_tokens /
+  history_plies / thinking / extra_request`；未知 kwargs 抛 `TypeError`。
+- `thinking` 档：请求体带 `enable_thinking` 开关；端点返回 HTTP 400 且错误文本疑似不认
+  该参数时，同 attempt 去参重发并将"不支持"结论缓存，后续不再带参。
+- 回复解析容错：裸 UCI / `MOVE:` 行 / 全部 UCI token 取最后一个合法者 / SAN 兜底 /
+  `reasoning_content` 兜底；全部需要 `chess.Move.from_uci` + `move in board.legal_moves`。
+- 失败语义（用户确认）：重试耗尽直接抛错，不兜底。普通对局返回 500；观战/批量对弈 job
+  以 error 终止。
+- `eval` 恒为 `None`（LLM 不产出可信 WDL，不伪造）；`llm` 字段记录上一步引擎调用的元信息
+  （`model / attempts / raw / reasoning_chars / thinking / thinking_param_supported`）。
+- **不声明 `KIT_FACTORY`**：观战 / 批量对弈走 `Kit.serving:game_engine_player_factory`
+  包装六方法（4 worker、每进程一局）。
+- 密钥纪律：`.env` 不入库；异常/日志/状态返回均不含 API key。
 
 ### 给模型加/改预设：config.json 与 *.local.json
 
