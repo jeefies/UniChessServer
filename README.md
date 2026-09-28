@@ -26,7 +26,29 @@
 - `GET /api/games` → `{"sessions":[{"session_id","model_name","arg_name","engine_white"}]}`
 - `GET /` 与 `/static/<file>` 静态页面
 
-错误码：404 模型名非法/不存在或会话不存在（已被淘汰）；400 预设不存在、FEN 非法、走法不合法或轮到引擎；501 引擎未接入（`IMPLEMENTED=False`）；500 其它异常（detail 形如 `"ExceptionType: message"`）。
+错误码：401 访问口令缺失/错误（见下节）；404 模型名非法/不存在或会话不存在（已被淘汰）；400 预设不存在、FEN 非法、走法不合法或轮到引擎；501 引擎未接入（`IMPLEMENTED=False`）；500 其它异常（detail 形如 `"ExceptionType: message"`）。
+
+## 鉴权：两道彼此独立的门禁
+
+两道门禁的口令**互不通用**：拿到一个不等于拿到另一个。
+
+| 门禁 | 请求头 | 口令来源 | 覆盖范围 |
+|---|---|---|---|
+| 访问口令 | `X-Access-Token` | `UNICHESS_ACCESS_TOKEN`，否则 `~/.config/unichess/access_token`（600，不入库） | **所有** `/api/*` |
+| 管理员口令 | `X-Admin-Token` | `UNICHESS_ADMIN_TOKEN`，否则 `~/.config/unichess/admin_token`（600，不入库） | 仅在 `/api/arena/batch/start`、`/stop` 之上叠加 |
+
+- 实现在 `access_auth.py`（访问口令）与 `app.py` 的 `require_admin`（管理员口令）。两份代码刻意不共用常量与函数，
+  免得日后加转发头时"改了 admin 忘了 access"；`tests/test_access_auth.py` 有对拍，两者漂移会红。
+- **本机直连免口令**：对端是 `127.0.0.1`/`::1`/`localhost` 且不带任何代理转发头时，两道门禁都放行
+  （运维脚本、systemd 看门狗、单测直接调函数都靠这条）。隧道把公网流量也送到 127.0.0.1，
+  所以带 `x-forwarded-for`/`x-real-ip`/`cf-connecting-ip`/`forwarded`/`cf-ray` 任一头的请求一律不算本机。
+- **未配置口令 = 拒绝远程**：两个门禁都是 fail-closed，没配口令时公网一律 401/403，只有本机直连能用。
+- 口令比对：HTTP 规范会去掉头值首尾空白，其余字符必须完全一致（常量时间比较，截断/前缀都不行）。
+- 静态页面（`/`、`/arena`、`/arena/batch`、`/static/*`）**不设门禁**：浏览器打开文档时带不了自定义请求头。
+  访客口令由 `static/access-gate.js` 负责——它包住 `window.fetch` 注入请求头，收到 401 弹遮罩索要口令，
+  拿到后存 `localStorage` 并自动重发原请求（最多重试 3 次）。三个页面都引入了它，
+  `tests/test_access_auth.py` 会检查这一点，新增页面别忘了加 `<script src="/static/access-gate.js"></script>`。
+- `/docs`、`/redoc`、`/openapi.json` 已关闭：全部接口都要口令，没必要对外暴露接口清单。
 
 `state()` 保证字段：`fen`（服务层权威 Board，引擎返回值不覆盖）、`legal_moves`、`is_game_over`、`engine_white`。引擎可额外提供：`last_move`、`san_history`、`eval{win,draw,loss,pov}`、`source`、`engine_ms`、`in_check`。
 
@@ -45,9 +67,10 @@ Server 只读 job 目录（`status.json` / `live.json` / `results.jsonl`），�
   `POST /api/arena/games/{id}/step` 按序揭示下一步，引擎还没走出时最多等 20 秒，仍无则 `step.pending=true`；
   `step.turn` 为刚走棋的一方，`step.eval` 为白方视角。最多 2 局同时观战（超出停最旧一局并记 `stopped`）；
   `DELETE` 结束并入库；没人单步的局下完后由 Monitor 自动入库。
-- 批量对弈 `POST /api/arena/batch/start` / `POST /api/arena/batch/stop` **仅管理员**（`X-Admin-Token` 或直连 localhost；
-  隧道流量靠转发头识别为公网）。轮数为 2..200 的偶数，同开局换色成对；开局取 kit 自带开局库。统计按模型 A/B
-  （`tally.a_win/b_win/draw`），`GET /api/arena/batch/state` 的 `batch.summary` 带 Elo±95%CI、五项分布、重复局率等。
+- 批量对弈 `POST /api/arena/batch/start` / `POST /api/arena/batch/stop` **仅管理员**（`X-Admin-Token`；
+   公网还需先过 `X-Access-Token` 访问门禁，见「鉴权」一节。本机直连两道都豁免）。
+   轮数为 2..200 的偶数，同开局换色成对；开局取 kit 自带开局库。统计按模型 A/B
+   （`tally.a_win/b_win/draw`），`GET /api/arena/batch/state` 的 `batch.summary` 带 Elo±95%CI、五项分布、重复局率等。
   每局以 `<batch_id>-g<n>` 入库，`GET /api/arena/records?batch_id=<id>` 按批次筛选（`__batch__` = 所有批次局）。
 - 错误码：409 已有批次在跑；503 GPU 租约拒绝（训练等占用显存）；其余同对局接口。
 - 服务重启：job 进程随 cgroup 一起结束；启动时 running 批次若 job 已写完就照常收尾，否则记 `interrupted`。

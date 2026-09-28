@@ -18,6 +18,15 @@ GameEngine 类（见 models/__init__.py 顶部注释的契约），即可通过�
 - /static 只提供服务页面文件：.bak / .before-* / 点文件 / ~ 结尾的备份
   一律 404，避免旧版前端源码随部署目录外泄。
 
+鉴权（两道彼此独立的门禁，见 access_auth.py 与下面的 require_admin）：
+- **访问口令** `X-Access-Token`（access_auth.py）：覆盖**所有** /api/*，
+  口令在 `~/.config/unichess/access_token` 或 `UNICHESS_ACCESS_TOKEN`。
+- **管理员口令** `X-Admin-Token`（本文件 require_admin）：只在批量对弈
+  start/stop 之上叠加，口令在 `~/.config/unichess/admin_token` 或
+  `UNICHESS_ADMIN_TOKEN`。两个口令互不通用。
+- 静态页面（`/`、`/static/*`）不设门禁：浏览器打开文档时带不了自定义请求头，
+  由 static/access-gate.js 注入请求头并在收到 401 时弹遮罩索要口令。
+
 本文件只负责路由和调度，不包含任何模型专属逻辑（编码/解码/网络定义/
 搜索算法等一律留在各自的 models/{model_name}/ 目录里）。
 
@@ -31,17 +40,28 @@ import hmac
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import access_auth
 import arena_storage as a_storage
 import jobs
 import models as model_registry
 import session_manager as sm
 
-app = FastAPI(title="UniChessServer", description="统一棋类对局接口")
+# docs/openapi/redoc 一律关闭：全部接口都要访问口令，没必要再对外暴露接口清单。
+app = FastAPI(
+    title="UniChessServer",
+    description="统一棋类对局接口",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+# 下面 17 个 /api/* 路由都用这个名字挂门禁（定义在 access_auth.py）
+require_access_token = access_auth.require_access_token
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -116,7 +136,7 @@ def _session_error_to_http(e: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
-@app.get("/api/models")
+@app.get("/api/models", dependencies=[Depends(require_access_token)])
 def list_models():
     """列出当前已发现模型及真实状态（available / not_implemented / error）。"""
     result = {}
@@ -125,7 +145,7 @@ def list_models():
     return {"models": result}
 
 
-@app.post("/api/new")
+@app.post("/api/new", dependencies=[Depends(require_access_token)])
 def new_game(req: NewGameRequest):
     try:
         session = sm.manager.create(req.model_name, req.arg_name, req.fen, req.engine_white)
@@ -144,7 +164,7 @@ def new_game(req: NewGameRequest):
     return {"session_id": session.session_id, "state": session.state()}
 
 
-@app.post("/api/games/{session_id}/move")
+@app.post("/api/games/{session_id}/move", dependencies=[Depends(require_access_token)])
 def make_move(session_id: str, req: MoveRequest):
     try:
         session = sm.manager.get(session_id)
@@ -157,7 +177,7 @@ def make_move(session_id: str, req: MoveRequest):
     return {"session_id": session_id, "result": result, "state": session.state()}
 
 
-@app.get("/api/games/{session_id}/state")
+@app.get("/api/games/{session_id}/state", dependencies=[Depends(require_access_token)])
 def game_state(session_id: str):
     try:
         session = sm.manager.get(session_id)
@@ -169,7 +189,7 @@ def game_state(session_id: str):
     return {"session_id": session_id, "state": state}
 
 
-@app.post("/api/games/{session_id}/undo")
+@app.post("/api/games/{session_id}/undo", dependencies=[Depends(require_access_token)])
 def undo_move(session_id: str):
     try:
         session = sm.manager.get(session_id)
@@ -182,7 +202,7 @@ def undo_move(session_id: str):
     return {"session_id": session_id, "result": result, "state": session.state()}
 
 
-@app.delete("/api/games/{session_id}")
+@app.delete("/api/games/{session_id}", dependencies=[Depends(require_access_token)])
 def close_game(session_id: str):
     try:
         sm.manager.close(session_id)
@@ -195,7 +215,7 @@ def close_game(session_id: str):
     return {"session_id": session_id, "closed": True}
 
 
-@app.get("/api/games")
+@app.get("/api/games", dependencies=[Depends(require_access_token)])
 def list_games():
     return {"sessions": sm.manager.list_sessions()}
 
@@ -228,7 +248,7 @@ def _engine_error_to_http(e: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
-@app.post("/api/arena/new")
+@app.post("/api/arena/new", dependencies=[Depends(require_access_token)])
 def new_arena(req: NewArenaRequest):
     try:
         watch = jobs.arena_service().create(
@@ -243,7 +263,7 @@ def new_arena(req: NewArenaRequest):
         raise _engine_error_to_http(e)
 
 
-@app.post("/api/arena/games/{arena_id}/step")
+@app.post("/api/arena/games/{arena_id}/step", dependencies=[Depends(require_access_token)])
 def arena_step(arena_id: str):
     """揭示下一步；引擎还在想时最多等 jobs.STEP_WAIT_S 秒，仍没有则 step.pending=true。"""
     try:
@@ -254,7 +274,7 @@ def arena_step(arena_id: str):
         raise _engine_error_to_http(e)
 
 
-@app.get("/api/arena/games/{arena_id}/state")
+@app.get("/api/arena/games/{arena_id}/state", dependencies=[Depends(require_access_token)])
 def arena_state(arena_id: str):
     try:
         return {"arena_id": arena_id, "state": jobs.arena_service().get(arena_id).state()}
@@ -262,7 +282,7 @@ def arena_state(arena_id: str):
         raise _engine_error_to_http(e)
 
 
-@app.delete("/api/arena/games/{arena_id}")
+@app.delete("/api/arena/games/{arena_id}", dependencies=[Depends(require_access_token)])
 def close_arena(arena_id: str):
     try:
         jobs.arena_service().close(arena_id)
@@ -271,7 +291,7 @@ def close_arena(arena_id: str):
     return {"arena_id": arena_id, "closed": True}
 
 
-@app.get("/api/arena/records")
+@app.get("/api/arena/records", dependencies=[Depends(require_access_token)])
 def list_arena_records(limit: int = 50, offset: int = 0, batch_id: str | None = None):
     try:
         records = a_storage.storage.list_records(limit=limit, offset=offset, batch_id=batch_id)
@@ -280,7 +300,7 @@ def list_arena_records(limit: int = 50, offset: int = 0, batch_id: str | None = 
     return {"records": records, "limit": limit, "offset": offset, "batch_id": batch_id}
 
 
-@app.get("/api/arena/records/{record_id}")
+@app.get("/api/arena/records/{record_id}", dependencies=[Depends(require_access_token)])
 def get_arena_record(record_id: str):
     try:
         record = a_storage.storage.get_record(record_id)
@@ -301,7 +321,7 @@ def batch_page():
     return FileResponse(str(batch_html))
 
 
-@app.post("/api/arena/batch/start")
+@app.post("/api/arena/batch/start", dependencies=[Depends(require_access_token)])
 def start_batch(req: BatchStartRequest, request: Request):
     require_admin(request)
     try:
@@ -317,7 +337,7 @@ def start_batch(req: BatchStartRequest, request: Request):
         raise _engine_error_to_http(e)
 
 
-@app.post("/api/arena/batch/stop")
+@app.post("/api/arena/batch/stop", dependencies=[Depends(require_access_token)])
 def stop_batch(request: Request):
     require_admin(request)
     try:
@@ -326,7 +346,7 @@ def stop_batch(request: Request):
         raise _engine_error_to_http(e)
 
 
-@app.get("/api/arena/batch/state")
+@app.get("/api/arena/batch/state", dependencies=[Depends(require_access_token)])
 def batch_state():
     try:
         return jobs.batch_service().snapshot()
@@ -349,7 +369,7 @@ def _stop_job_monitor():
     jobs.arena_service().close_all()
 
 
-@app.get("/api/health")
+@app.get("/api/health", dependencies=[Depends(require_access_token)])
 def health():
     return {"status": "ok", "models": model_registry.available_models()}
 

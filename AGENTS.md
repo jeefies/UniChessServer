@@ -8,8 +8,9 @@
 - 无 `pyproject.toml` / `requirements.txt` / CI：直接 `python app.py` 运行
 - 启动：`python app.py --host 127.0.0.1 --port 8000`（仅接受 `--host/--port`）
 - 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；145 项，
-  其中 M3 19 项 / M2 24 项 / DS 15 项）。Windows 本机有 3 项因符号链接权限必失败
-  （与 M2/M3 无关），远端全绿
+  其中访问门禁 26 项 / M3 19 项 / M2 24 项 / DS 15 项 / jobs 33 项 / server 28 项）。
+  Windows 本机有 4 项必失败：3 项符号链接权限 + 1 项 `../M2` 包不在本机
+  （`describe_model('M2')` 报 error），都与门禁无关，干净树上同样失败；远端 145 项全绿
 - 远端部署：systemd 用户级服务 `unichess-server.service` + `unichess-tunnel.service`
 - 接口清单与模型插件契约见 `README.md`（刷新区块务必同步两份）
 
@@ -81,6 +82,28 @@ worker 是先追加着法再补 detail 的，只等着法就揭示会让前端�
 - 批量对弈 `/api/arena/batch/start`、`/stop` 仅限管理员：请求头 `X-Admin-Token`，
   口令在远端 `~/.config/unichess/admin_token`（600 权限，不入库；也可用环境变量
   `UNICHESS_ADMIN_TOKEN`）
+
+## 鉴权：两道彼此独立的门禁（2026-09-28 起全部接口都要口令）
+
+| 门禁 | 请求头 | 口令来源 | 覆盖范围 |
+|---|---|---|---|
+| 访问口令 | `X-Access-Token` | `UNICHESS_ACCESS_TOKEN`，否则 `~/.config/unichess/access_token` | **所有** `/api/*` |
+| 管理员口令 | `X-Admin-Token` | `UNICHESS_ADMIN_TOKEN`，否则 `~/.config/unichess/admin_token` | 只在 batch start/stop 之上叠加 |
+
+- 访问门禁实现在 `access_auth.py`（`require_access_token`），管理员门禁在 `app.py`
+  （`require_admin`）。两份常量与函数刻意不共用：转发头清单会随部署变化，共用就会出现
+  "改了 admin 忘了 access"。`tests/test_access_auth.py` 有对拍（互相冒充口令、环回口径、
+  路由表完备性），漂移会红。
+- **新增 /api 路由必须挂门禁**：`dependencies=[Depends(require_access_token)]`，
+  `test_every_api_route_is_gated` 会扫路由表兜底；新增静态页面要引入
+  `<script src="/static/access-gate.js"></script>`（`test_pages_load_the_gate` 兜底）。
+- **页面路由（`/`、`/arena`、`/arena/batch`）不能挂门禁**：浏览器打开文档时带不了自定义
+  请求头，口令只能由 `static/access-gate.js` 注入（401 弹遮罩 → 存 localStorage → 自动重发）。
+- **本机直连免口令**（对端 127.0.0.1/::1/localhost 且无任何代理转发头）：运维与单测靠这条。
+  隧道把公网流量也送到 127.0.0.1，所以带 `x-forwarded-for`/`x-real-ip`/`cf-connecting-ip`/
+  `forwarded`/`cf-ray` 任一头的一律不算本机。
+- **fail-closed**：没配口令时公网一律 401/403，只有本机直连可用。
+- `/docs`、`/redoc`、`/openapi.json` 已关闭（`docs_url=None` 等），未匹配的 /api 路径仍是 404。
 
 ## 隧道与代理
 
