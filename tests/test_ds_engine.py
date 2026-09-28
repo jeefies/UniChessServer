@@ -19,6 +19,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import models as model_registry  # noqa: E402
 import session_manager as sm  # noqa: E402
+from jobs import resolve_engine  # noqa: E402
 import chess  # noqa: E402
 
 
@@ -108,10 +109,9 @@ class TestDSContract(unittest.TestCase):
         self.assertEqual(len(session.board.move_stack), 1)
         state = session.state()
         self.assertEqual(len(state['san_history']), 1)
-        human_uci = 'e7e5' if session.board.move_stack[-1].uci() == 'e2e4' else 'e7e6'
-        fake = lambda *a, **k: {'content': human_uci, 'reasoning_content': ''}
+        fake = lambda *a, **k: {'content': 'g1f3', 'reasoning_content': ''}
         session.engine._chat_impl = staticmethod(fake)
-        result = session.human_move(human_uci)
+        result = session.human_move('e7e5')
         self.assertIn('engine_move', result)
         self.assertEqual(len(session.board.move_stack), 3)
 
@@ -140,7 +140,7 @@ class TestDSContract(unittest.TestCase):
 
     def test_undo_rolls_back_both_sides(self):
         session = self._make_session(engine_white=True)
-        fake = lambda *a, **k: {'content': 'e7e5', 'reasoning_content': ''}
+        fake = lambda *a, **k: {'content': 'g1f3', 'reasoning_content': ''}
         session.engine._chat_impl = staticmethod(fake)
         session.human_move('e7e5')
         self.assertEqual(len(session.board.move_stack), 3)
@@ -163,8 +163,7 @@ class TestDSContract(unittest.TestCase):
         session = self._make_session(engine_white=False)
         fake = lambda *a, **k: {'content': 'e7e5', 'reasoning_content': 't' * 7}
         session.engine._chat_impl = staticmethod(fake)
-        session.human_move('e2e4')
-        result = session.human_move('e7e5')
+        result = session.human_move('e2e4')
         state = session.state()
         for key in ('fen', 'legal_moves', 'history', 'san_history',
                     'last_move', 'last_move_san', 'last_move_actor',
@@ -172,11 +171,11 @@ class TestDSContract(unittest.TestCase):
             self.assertIn(key, state)
         self.assertIsNone(state['eval'])
         self.assertIsNotNone(state['llm'])
-        self.assertEqual(state['llm']['engine_move'], 'e2e4')
-        self.assertEqual(result['engine_move'], 'e2e4')
+        self.assertEqual(state['llm']['engine_move'], 'e7e5')
+        self.assertEqual(result['engine_move'], 'e7e5')
 
     def test_resolve_engine_native_is_false(self):
-        ref = model_registry.resolve_engine('DS', None)
+        ref = resolve_engine('DS', None)
         self.assertFalse(ref.native)
 
 
