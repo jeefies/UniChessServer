@@ -131,7 +131,7 @@ python app.py --host 127.0.0.1 --port 8000
 | `S` | 符号链接 → `/home/jeefy/UniChess/SSM`（状态序列模型主线，stage B 自对弈 RL） | available，预设 `champion` |
 | `M3` | 符号链接 → `/home/jeefy/UniChess/M3`（上游冻结可玩包：`src/chess_ai` 30M finalist + `NeuralMCTS`，3,695,244 参数 / 14.8MB 权重） | available，预设 `default`, `preview`, `policy` |
 | `M2` | 真实目录 `models/M2/`（适配层）+ `/home/jeefy/UniChess/M2`（上游 chess_ai neural v2.0.0 原包：策略网 `ChessCNN` + 价值网 `ResidualValueModel` + negamax/PUCT 搜索） | available，预设 `default`, `fast`, `deep`, `policy` |
-| `DS` | 真实目录 `Server/models/DS/`（`DS/` 仓库百炼 OpenAI 兼容端点大模型引擎，`.env` 存密钥） | available，预设 `default`, `fast` |
+| `DS` | 符号链接 → `/home/jeefy/UniChess/DS`（`DS` 仓库 = jeefies/UniChessLLM，百炼 OpenAI 兼容端点大模型引擎；`.env` 在 DS 仓库内、不入库） | available，预设 `default`, `fast` |
 
 命名约定：模型名保持简短（`T` 而非 `transformer`，`R` 而非 `resnet`），避免冗长；接入新项目时用符号链接 + 简短名，例如 `ln -s /home/jeefy/UniChess/ResNet models/R`。旧有的占位桩目录（`models/transformer/`、`models/resnet/`）已被对应的符号链接取代并清理。
 
