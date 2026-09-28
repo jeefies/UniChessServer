@@ -398,6 +398,13 @@ if STATIC_DIR.is_dir():
     def index():
         return FileResponse(str(STATIC_DIR / "index.html"))
 
+    @app.get("/favicon.ico")
+    def favicon():
+        """站点图标，与 blog.jeefy.top 同一个文件（上游是 JPEG，故按 JPEG 提供）。"""
+        return FileResponse(
+            str(STATIC_DIR / "favicon.jpg"), media_type="image/jpeg"
+        )
+
 
 def main():
     import uvicorn

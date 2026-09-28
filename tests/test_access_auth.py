@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import pathlib
 import sys
 import tempfile
@@ -239,6 +240,20 @@ class FrontendGateTestCase(unittest.TestCase):
         self.assertNotIn(".before-", name)
         self.assertFalse(name.endswith("~"))
 
+    def test_favicon_serves_the_blog_icon(self):
+        """/favicon.ico 提供与 blog.jeefy.top 同一个文件（上游是 JPEG）。"""
+        favicon = STATIC_DIR / "favicon.jpg"
+        self.assertTrue(favicon.is_file(), "static/favicon.jpg 缺失")
+        data = favicon.read_bytes()
+        self.assertEqual(data[:3], b"\xff\xd8\xff", "不是 JPEG")
+        # 与上游一致（SHA-256，2026-09-28 取自 blog.jeefy.top/favicon.jpg）
+        self.assertEqual(
+            hashlib.sha256(data).hexdigest(),
+            "196f436c2cd33a781e083cb65fdf0edc483539966bd7b9d79cb5d1531be7cfa6",
+        )
+        paths = {r.path for r in app.app.routes if isinstance(r, APIRoute)}
+        self.assertIn("/favicon.ico", paths)
+
 
 @unittest.skipUnless(_HAS_TESTCLIENT, "环境缺少 httpx，跳过 HTTP 层用例")
 class HttpLayerTestCase(unittest.TestCase):
@@ -280,6 +295,11 @@ class HttpLayerTestCase(unittest.TestCase):
         r = self.client.get("/static/access-gate.js")
         self.assertEqual(r.status_code, 200)
         self.assertIn("X-Access-Token", r.text)
+        # 站点图标与静态资源同级：不设门禁，浏览器直接拿
+        r = self.client.get("/favicon.ico")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers["content-type"].split(";")[0], "image/jpeg")
+        self.assertEqual(r.content[:3], b"\xff\xd8\xff")
 
     def test_unknown_api_path_is_not_accessible(self):
         # 未匹配路径先被路由挡成 404（依赖还没轮到跑），拿不到任何数据；

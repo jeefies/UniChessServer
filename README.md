@@ -25,6 +25,8 @@
 - `DELETE /api/games/{session_id}` → `{"session_id","closed":true}`
 - `GET /api/games` → `{"sessions":[{"session_id","model_name","arg_name","engine_white"}]}`
 - `GET /` 与 `/static/<file>` 静态页面
+- `GET /favicon.ico` → 站点图标（文件是 `static/favicon.jpg`，与 blog.jeefy.top 同一个文件，
+  上游是 JPEG 所以按 `image/jpeg` 提供；三个页面都用 `<link rel="icon">` 指向它）
 
 错误码：401 访问口令缺失/错误（见下节）；404 模型名非法/不存在或会话不存在（已被淘汰）；400 预设不存在、FEN 非法、走法不合法或轮到引擎；501 引擎未接入（`IMPLEMENTED=False`）；500 其它异常（detail 形如 `"ExceptionType: message"`）。
 
@@ -48,6 +50,7 @@
   访客口令由 `static/access-gate.js` 负责——它包住 `window.fetch` 注入请求头，收到 401 弹遮罩索要口令，
   拿到后存 `localStorage` 并自动重发原请求（最多重试 3 次）。三个页面都引入了它，
   `tests/test_access_auth.py` 会检查这一点，新增页面别忘了加 `<script src="/static/access-gate.js"></script>`。
+  `/favicon.ico` 与 `/static/*` 同理不设门禁。
 - `/docs`、`/redoc`、`/openapi.json` 已关闭：全部接口都要口令，没必要对外暴露接口清单。
 
 `state()` 保证字段：`fen`（服务层权威 Board，引擎返回值不覆盖）、`legal_moves`、`is_game_over`、`engine_white`。引擎可额外提供：`last_move`、`san_history`、`eval{win,draw,loss,pov}`、`source`、`engine_ms`、`in_check`。
