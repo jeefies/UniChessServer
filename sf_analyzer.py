@@ -627,6 +627,10 @@ class StockfishAnalyzer:
                             step1_history[d][mpv] = _format_eval_item(info, max_pv_plies)
                             last_info_step1.clear()
                             last_info_step1.update(info)
+                            # 达成目标深度后即刻退出主搜索（无需等待超时）
+                            if depth < STANDARD_DEPTH and d >= depth and len(step1_history[d]) >= multi_pv:
+                                analysis.stop()
+                                break
             except Exception as exc:
                 logger.warning("主分析引擎搜索异常: %s", exc)
             finally:
@@ -655,6 +659,11 @@ class StockfishAnalyzer:
                             )
                             last_info_step2.clear()
                             last_info_step2.update(info)
+
+                            # 达成目标深度后即刻退出辅助搜索
+                            if depth < STANDARD_DEPTH and d >= depth:
+                                analysis_played.stop()
+                                break
 
                             # 大漏勺提前截断：若主引擎已搜索完成，且实战走法已达到足够战术深度（>= 12），
                             # 且已暴跌为确定性大漏（<= -600 cp 或已被将杀），提前截断辅助推演
@@ -730,6 +739,9 @@ class StockfishAnalyzer:
                                 )
                                 last_info_step2.clear()
                                 last_info_step2.update(info)
+                                if d >= d1:
+                                    analysis_played.stop()
+                                    break
                 except Exception as exc:
                     logger.warning("串行阶段二异常: %s", exc)
 
@@ -918,6 +930,13 @@ class StockfishAnalyzer:
                         if d is not None and mpv is not None:
                             depth_history[d][mpv] = _format_eval_item(info, effective_max_pv_plies)
                             last_info = info
+                            if (
+                                effective_depth < STANDARD_DEPTH
+                                and d >= effective_depth
+                                and len(depth_history[d]) >= effective_multi_pv
+                            ):
+                                analysis.stop()
+                                break
             except chess.engine.EngineTerminatedError:
                 logger.error("Stockfish 引擎在评估中异常退出，尝试重建")
                 self._engine = None
