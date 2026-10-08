@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 import unittest
@@ -23,15 +24,18 @@ import session_manager as sm  # noqa: E402
 from jobs import resolve_engine  # noqa: E402
 
 _SERVER_ROOT = pathlib.Path(__file__).resolve().parent.parent
-_BINARY = _SERVER_ROOT / 'tools' / 'stockfish.exe'
+
+
+def _binary_present() -> bool:
+    """与 models/SF/engine.py 的定位口径一致：环境变量优先，再 tools/ 下两个平台名。"""
+    if os.environ.get('UNICHESS_STOCKFISH_BIN'):
+        return True
+    return any((_SERVER_ROOT / 'tools' / name).is_file()
+               for name in ('stockfish', 'stockfish.exe'))
 
 
 def _sf_available() -> bool:
     return 'SF' in model_registry.available_models()
-
-
-def _binary_present() -> bool:
-    return _BINARY.is_file()
 
 
 def _tiny_kwargs() -> dict:
