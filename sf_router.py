@@ -103,7 +103,7 @@ class AnalyzeMoveRequest(BaseModel):
     requestId: str | None = Field(None, description="请求唯一标识，便于跟踪或取消。")
     position: PositionInput = Field(..., description="待分析着法落子前的局面历史。")
     playedMove: str = Field(..., description="实战走出的单步 UCI 着法（如 f1c4）。")
-    profile: str | None = Field("deep", description="预设档位（fast / standard / deep / ultra）。")
+    profile: str | None = Field("deep", description="预设档位（lightning / fast / standard / deep / ultra）。")
     limits: MoveAnalysisLimits | None = Field(
         None, description="搜索预算限制；若省略则继承 profile 或标准深度 128。"
     )
@@ -118,7 +118,7 @@ class AnalyzeMoveRequest(BaseModel):
 class EvaluateRequest(BaseModel):
     requestId: str | None = Field(None, description="请求唯一标识。")
     position: PositionInput = Field(..., description="待评估局面。")
-    profile: str | None = Field("standard", description="预设档位。")
+    profile: str | None = Field("standard", description="预设档位（lightning / fast / standard / deep / ultra）。")
     limits: MoveAnalysisLimits | None = Field(None, description="搜索限制。")
     multiPv: int | None = Field(DEFAULT_MULTI_PV, ge=1, le=10, description="候选线数。")
     maxPvPlies: int | None = Field(DEFAULT_MAX_PV_PLIES, ge=1, le=64, description="PV 步数。")

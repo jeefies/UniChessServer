@@ -27,18 +27,26 @@ STANDARD_DEPTH = 128
 DEFAULT_MAX_TIME_MS = 4000
 DEFAULT_MULTI_PV = 2
 DEFAULT_MAX_PV_PLIES = 12
-DEFAULT_THREADS = int(os.environ.get("UNICHESS_SF_THREADS", "4"))
-DEFAULT_HASH_MB = int(os.environ.get("UNICHESS_SF_HASH_MB", "512"))
+DEFAULT_THREADS = int(os.environ.get("UNICHESS_SF_THREADS", "8"))
+DEFAULT_HELPER_THREADS = int(os.environ.get("UNICHESS_SF_HELPER_THREADS", "4"))
+DEFAULT_HASH_MB = int(os.environ.get("UNICHESS_SF_HASH_MB", "1024"))
 DEFAULT_CACHE_SIZE = int(os.environ.get("UNICHESS_SF_CACHE_SIZE", "500"))
 
 # 预设档位（profile）
 PROFILES: dict[str, dict[str, Any]] = {
-    "fast": {
-        "depth": STANDARD_DEPTH,
-        "maxTimeMs": 1500,
+    "lightning": {
+        "depth": 22,
+        "maxTimeMs": 600,
         "multiPv": 2,
         "maxPvPlies": 10,
-        "description": "快档：1.5 秒预算，适合快速粗评与移动端低延时交互。",
+        "description": "极速档：目标深度 22，硬时间上限 600ms，双路并发，适合毫秒级 AI 对话交互。",
+    },
+    "fast": {
+        "depth": 22,
+        "maxTimeMs": 1000,
+        "multiPv": 2,
+        "maxPvPlies": 10,
+        "description": "快档：目标深度 22，硬时间上限 1000ms，兼顾战术深度与秒级交互。",
     },
     "standard": {
         "depth": STANDARD_DEPTH,
@@ -145,23 +153,27 @@ class StockfishAnalyzer:
         self,
         binary: str | None = None,
         threads: int = DEFAULT_THREADS,
+        helper_threads: int = DEFAULT_HELPER_THREADS,
         hash_mb: int = DEFAULT_HASH_MB,
         cache_size: int = DEFAULT_CACHE_SIZE,
     ) -> None:
         self.binary_path = _resolve_binary(binary)
         self.threads = threads
+        self.helper_threads = helper_threads
         self.hash_mb = hash_mb
         self._lock = threading.Lock()
         self._engine: chess.engine.SimpleEngine | None = None
+        self._helper_engine: chess.engine.SimpleEngine | None = None
         self._engine_identity: str = "Stockfish"
         self._cache: collections.OrderedDict[tuple, dict[str, Any]] = collections.OrderedDict()
         self._cache_size = cache_size
         self._current_cancel_event: threading.Event | None = None
         self._current_analysis: Any | None = None
+        self._current_helper_analysis: Any | None = None
         self._current_request_id: str | None = None
 
     def _ensure_engine(self) -> chess.engine.SimpleEngine:
-        """确保底层 UCI 引擎正常存活，若未启动或崩溃则重启。"""
+        """确保底层 UCI 主引擎正常存活，若未启动或崩溃则重启。"""
         if self._engine is not None:
             # 探测进程是否存活
             try:
@@ -172,7 +184,7 @@ class StockfishAnalyzer:
                 self._engine = None
 
         if self._engine is None:
-            logger.info("正在启动 Stockfish UCI 分析子进程: %s", self.binary_path)
+            logger.info("正在启动 Stockfish UCI 主分析子进程: %s", self.binary_path)
             engine = chess.engine.SimpleEngine.popen_uci(self.binary_path)
             identity = str(engine.id.get("name") or "Stockfish")
             if STOCKFISH_VERSION and STOCKFISH_VERSION not in identity:
@@ -193,6 +205,36 @@ class StockfishAnalyzer:
 
         return self._engine
 
+    def _ensure_helper_engine(self) -> chess.engine.SimpleEngine | None:
+        """确保第二路辅助分析引擎正常存活（用于与主引擎并发推演）。"""
+        if self._helper_engine is not None:
+            try:
+                poll = getattr(self._helper_engine.transport, "get_returncode", None)
+                if callable(poll) and poll() is not None:
+                    self._helper_engine = None
+            except Exception:
+                self._helper_engine = None
+
+        if self._helper_engine is None:
+            try:
+                logger.info("正在启动 Stockfish UCI 辅助分析子进程（并发加速）: %s", self.binary_path)
+                engine = chess.engine.SimpleEngine.popen_uci(self.binary_path)
+                engine.configure({
+                    "Threads": self.helper_threads,
+                    "Hash": max(64, self.hash_mb // 2),
+                    "Move Overhead": 10,
+                })
+                try:
+                    engine.configure({"UCI_ShowWDL": True})
+                except Exception:
+                    pass
+                self._helper_engine = engine
+            except Exception as exc:
+                logger.warning("辅助 Stockfish 引擎启动失败，将优雅降级为单引擎串行: %s", exc)
+                self._helper_engine = None
+
+        return self._helper_engine
+
     def cancel(self, request_id: str | None = None) -> bool:
         """中断当前正在运行的分析（若匹配 requestId 或未指定）。"""
         with self._lock:
@@ -204,7 +246,14 @@ class StockfishAnalyzer:
                             self._current_analysis.stop()
                         except Exception:
                             pass
+                    if self._current_helper_analysis is not None:
+                        try:
+                            self._current_helper_analysis.stop()
+                        except Exception:
+                            pass
                     return True
+        return False
+
     def _get_identity(self) -> str:
         """获取稳定的引擎版本与名称标识。"""
         with self._lock:
@@ -229,9 +278,11 @@ class StockfishAnalyzer:
                     "version": STOCKFISH_VERSION,
                     "binary": str(self.binary_path),
                     "threads": self.threads,
+                    "helperThreads": self.helper_threads,
                     "hashMb": self.hash_mb,
                     "nnue": True,
                     "showWdl": True,
+                    "parallelTwoStage": True,
                 },
                 "defaults": {
                     "standardDepth": STANDARD_DEPTH,
@@ -334,10 +385,13 @@ class StockfishAnalyzer:
             local_cancel = cancel_event or threading.Event()
             self._current_cancel_event = local_cancel
             self._current_request_id = request_id
+            helper_engine = None
             try:
                 engine = self._ensure_engine()
+                helper_engine = self._ensure_helper_engine()
                 res = self._execute_move_analysis(
                     engine=engine,
+                    helper_engine=helper_engine,
                     board=board,
                     played_move_obj=played_move_obj,
                     depth=effective_depth,
@@ -349,10 +403,12 @@ class StockfishAnalyzer:
             except chess.engine.EngineTerminatedError:
                 logger.error("Stockfish 引擎在分析中异常退出，尝试重建")
                 self._engine = None
+                self._helper_engine = None
                 raise RuntimeError("Stockfish engine terminated unexpectedly")
             finally:
                 self._current_cancel_event = None
                 self._current_analysis = None
+                self._current_helper_analysis = None
                 self._current_request_id = None
 
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
@@ -361,7 +417,9 @@ class StockfishAnalyzer:
             "name": self._engine_identity,
             "profile": profile or "standard",
             "threads": self.threads,
+            "helperThreads": self.helper_threads if helper_engine else 0,
             "hashMb": self.hash_mb,
+            "parallelTwoStage": helper_engine is not None,
         }
         res["stats"]["elapsedMs"] = elapsed_ms
         res["stats"]["cached"] = False
@@ -373,6 +431,7 @@ class StockfishAnalyzer:
     def _execute_move_analysis(
         self,
         engine: chess.engine.SimpleEngine,
+        helper_engine: chess.engine.SimpleEngine | None,
         board: chess.Board,
         played_move_obj: chess.Move,
         depth: int,
@@ -381,39 +440,127 @@ class StockfishAnalyzer:
         max_pv_plies: int,
         cancel_event: threading.Event,
     ) -> dict[str, Any]:
-        """两阶段执行同深度对拍。"""
+        """两阶段执行同深度对拍（支持双引擎并发推演）。"""
+        import concurrent.futures
+
         played_uci = played_move_obj.uci()
         total_time_s = max(0.1, max_time_ms / 1000.0)
 
-        # 阶段一时间预算：合理留给阶段二 searchmoves 补搜
-        if total_time_s >= 2.0:
-            step1_time_s = total_time_s * 0.65
-        elif total_time_s >= 1.0:
-            step1_time_s = total_time_s * 0.55
-        else:
-            step1_time_s = max(0.05, total_time_s * 0.50)
-
         step1_history: dict[int, dict[int, dict[str, Any]]] = collections.defaultdict(dict)
-        last_info: dict[str, Any] = {}
+        step2_history: dict[int, dict[str, Any]] = {}
+        last_info_step1: dict[str, Any] = {}
+        last_info_step2: dict[str, Any] = {}
 
         t0 = time.perf_counter()
 
-        # --- 阶段一：MultiPV 根局面搜索 ---
-        with engine.analysis(
-            board,
-            chess.engine.Limit(depth=depth, time=step1_time_s),
-            multipv=multi_pv,
-        ) as analysis:
-            self._current_analysis = analysis
-            for info in analysis:
-                if cancel_event.is_set():
-                    analysis.stop()
-                    break
-                d = info.get("depth")
-                mpv = info.get("multipv")
-                if d is not None and mpv is not None:
-                    step1_history[d][mpv] = _format_eval_item(info, max_pv_plies)
-                    last_info = info
+        def run_primary():
+            try:
+                with engine.analysis(
+                    board,
+                    chess.engine.Limit(depth=depth, time=total_time_s),
+                    multipv=multi_pv,
+                ) as analysis:
+                    self._current_analysis = analysis
+                    for info in analysis:
+                        if cancel_event.is_set():
+                            analysis.stop()
+                            break
+                        d = info.get("depth")
+                        mpv = info.get("multipv")
+                        if d is not None and mpv is not None:
+                            step1_history[d][mpv] = _format_eval_item(info, max_pv_plies)
+                            last_info_step1.clear()
+                            last_info_step1.update(info)
+            except Exception as exc:
+                logger.warning("主分析引擎搜索异常: %s", exc)
+
+        helper_stop_event = threading.Event()
+
+        def run_helper():
+            if helper_engine is None:
+                return
+            try:
+                with helper_engine.analysis(
+                    board,
+                    chess.engine.Limit(depth=depth, time=total_time_s),
+                    root_moves=[played_move_obj],
+                ) as analysis_played:
+                    self._current_helper_analysis = analysis_played
+                    for info in analysis_played:
+                        if cancel_event.is_set() or helper_stop_event.is_set():
+                            analysis_played.stop()
+                            break
+                        d = info.get("depth")
+                        if d is not None:
+                            step2_history[d] = _format_eval_item(
+                                info, max_pv_plies, override_move=played_uci
+                            )
+                            last_info_step2.clear()
+                            last_info_step2.update(info)
+            except Exception as exc:
+                logger.warning("辅助分析引擎搜索异常: %s", exc)
+
+        if helper_engine is not None and not cancel_event.is_set():
+            # 双路并发模式：主引擎搜 MultiPV 候选，辅助引擎并发定向推演实战走法
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                f_primary = executor.submit(run_primary)
+                f_helper = executor.submit(run_helper)
+
+                # 等待主引擎阶段一完成
+                f_primary.result()
+
+                # 快速判断 playedMove 是否已经在主引擎结果中
+                d_full = sorted([d for d, m in step1_history.items() if len(m) >= multi_pv])
+                d1 = d_full[-1] if d_full else max(step1_history.keys(), default=1)
+                played_in_candidates = any(
+                    item.get("move") == played_uci for item in step1_history.get(d1, {}).values()
+                )
+
+                if played_in_candidates:
+                    # 实战走法已在 Top 候选，通知辅助引擎停止
+                    helper_stop_event.set()
+                    if self._current_helper_analysis is not None:
+                        try:
+                            self._current_helper_analysis.stop()
+                        except Exception:
+                            pass
+
+                # 等待辅助引擎结束
+                f_helper.result()
+                step2_run = bool(step2_history)
+        else:
+            # 串行降级模式（辅助引擎不可用或异常）
+            run_primary()
+            d_full = sorted([d for d, m in step1_history.items() if len(m) >= multi_pv])
+            d1 = d_full[-1] if d_full else max(step1_history.keys(), default=1)
+            played_in_candidates = any(
+                item.get("move") == played_uci for item in step1_history.get(d1, {}).values()
+            )
+            step2_run = False
+            elapsed_step1 = time.perf_counter() - t0
+            remain_time_s = max(0.0, total_time_s - elapsed_step1)
+            if not played_in_candidates and remain_time_s >= 0.03 and not cancel_event.is_set():
+                step2_run = True
+                try:
+                    with engine.analysis(
+                        board,
+                        chess.engine.Limit(depth=d1, time=remain_time_s),
+                        root_moves=[played_move_obj],
+                    ) as analysis_played:
+                        self._current_analysis = analysis_played
+                        for info in analysis_played:
+                            if cancel_event.is_set():
+                                analysis_played.stop()
+                                break
+                            d = info.get("depth")
+                            if d is not None:
+                                step2_history[d] = _format_eval_item(
+                                    info, max_pv_plies, override_move=played_uci
+                                )
+                                last_info_step2.clear()
+                                last_info_step2.update(info)
+                except Exception as exc:
+                    logger.warning("串行阶段二异常: %s", exc)
 
         # 找出阶段一已完成的最佳深度 D1（优先选 MultiPV 全部分支已跑完的深度）
         d_full = sorted([d for d, m in step1_history.items() if len(m) >= multi_pv])
@@ -422,44 +569,19 @@ class StockfishAnalyzer:
         else:
             d_candidates = sorted([d for d, m in step1_history.items() if 1 in m])
             if not d_candidates:
-                d1 = last_info.get("depth", 1)
-                step1_history[d1][1] = _format_eval_item(last_info, max_pv_plies)
+                d1 = last_info_step1.get("depth", 1)
+                step1_history[d1][1] = _format_eval_item(last_info_step1, max_pv_plies)
             else:
                 d1 = d_candidates[-1]
 
         # 检查 playedMove 是否在阶段一的 MultiPV 候选中
         played_in_candidates = False
         played_eval_step1: dict[str, Any] | None = None
-        for rank, item in step1_history[d1].items():
+        for rank, item in step1_history.get(d1, {}).items():
             if item.get("move") == played_uci:
                 played_in_candidates = True
                 played_eval_step1 = item
                 break
-
-        step2_run = False
-        step2_history: dict[int, dict[str, Any]] = {}
-        elapsed_step1 = time.perf_counter() - t0
-        remain_time_s = max(0.0, total_time_s - elapsed_step1)
-
-        # --- 阶段二：若实战着法不在候选中，在剩余时间内定向搜索 ---
-        if not played_in_candidates and remain_time_s >= 0.03 and not cancel_event.is_set():
-            step2_run = True
-            with engine.analysis(
-                board,
-                chess.engine.Limit(depth=d1, time=remain_time_s),
-                root_moves=[played_move_obj],
-            ) as analysis_played:
-                self._current_analysis = analysis_played
-                for info in analysis_played:
-                    if cancel_event.is_set():
-                        analysis_played.stop()
-                        break
-                    d = info.get("depth")
-                    if d is not None:
-                        step2_history[d] = _format_eval_item(
-                            info, max_pv_plies, override_move=played_uci
-                        )
-                        last_info = info
 
         # 兜底：若实战走法既不在候选且阶段二未产生深度记录，补一次极浅同步评估
         if not played_in_candidates and not step2_history and not cancel_event.is_set():
@@ -481,7 +603,7 @@ class StockfishAnalyzer:
             played_eval = played_eval_step1
             second_eval = step1_history[d1].get(2)
             can_compare = True
-        elif step2_run and step2_history:
+        elif step2_history:
             d2 = max(step2_history.keys())
             common_depth = min(d1, d2)
             # 对齐到 common_depth 深度下的数据
@@ -531,10 +653,14 @@ class StockfishAnalyzer:
             "diffWdlLoss": diff_wdl_loss,
         }
 
+        total_nodes = (last_info_step1.get("nodes") or 0) + (last_info_step2.get("nodes") or 0)
+        nps = last_info_step1.get("nps") or last_info_step2.get("nps")
+        hashfull = last_info_step1.get("hashfull") or last_info_step2.get("hashfull")
+
         stats = {
-            "nodes": last_info.get("nodes"),
-            "nps": last_info.get("nps"),
-            "hashfull": last_info.get("hashfull"),
+            "nodes": total_nodes if total_nodes > 0 else (last_info_step1.get("nodes") or last_info_step2.get("nodes")),
+            "nps": nps,
+            "hashfull": hashfull,
         }
 
         return {
@@ -679,6 +805,12 @@ class StockfishAnalyzer:
                 except Exception:
                     pass
                 self._engine = None
+            if self._helper_engine is not None:
+                try:
+                    self._helper_engine.quit()
+                except Exception:
+                    pass
+                self._helper_engine = None
 
 
 # 单例分析服务

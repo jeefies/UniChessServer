@@ -93,6 +93,8 @@ class StockfishAnalysisEngineTestCase(unittest.TestCase):
         self.assertIn("Stockfish", info["engine"]["name"])
         self.assertEqual(info["defaults"]["standardDepth"], 128)
         self.assertIn("deep", info["profiles"])
+        self.assertIn("lightning", info["profiles"])
+        self.assertTrue(info["engine"]["parallelTwoStage"])
 
     def setUp(self):
         self.analyzer._cache.clear()
@@ -205,6 +207,21 @@ class StockfishAnalysisEngineTestCase(unittest.TestCase):
                 played_move="e1e8",  # 王不可能直接到 e8
             )
         self.assertIn("Illegal playedMove", str(ctx.exception))
+
+    def test_analyze_move_lightning_profile(self):
+        # 极速档：目标深度 22，硬时间 600ms，双路并发
+        res = self.analyzer.analyze_move(
+            initial_fen=None,
+            moves=["e2e4", "e7e5", "g1f3", "b8c6"],
+            played_move="a2a3",
+            profile="lightning",
+            request_id="test-lightning-001",
+        )
+        self.assertTrue(res["comparison"]["canCompare"])
+        self.assertEqual(res["played"]["move"], "a2a3")
+        self.assertLessEqual(res["stats"]["elapsedMs"], 3500)
+        self.assertGreaterEqual(res["comparison"]["commonDepth"], 4)
+        self.assertTrue(res["engine"]["parallelTwoStage"])
 
 
 class SfApiRoutesIntegrationTestCase(unittest.TestCase):
