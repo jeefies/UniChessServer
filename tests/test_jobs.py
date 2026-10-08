@@ -261,6 +261,41 @@ class TestBatchService(FakeModelsMixin, unittest.TestCase):
         self.assertEqual(final["batch"]["status"], "error")
         self.assertIn("故意失败", final["batch"]["error"] or "")
 
+    def test_snapshot_sanitizes_infinite_elo(self):
+        """SF 这类 baseline 全胜时 Elo 哨兵是 ±inf：不能让它把 state 接口打成 500。
+
+        Kit.stats 用 ELO_INF（float('inf')）当"一方全胜/还没下完"的哨兵，job 的
+        status.json 原样带进 snapshot；starlette 的 JSONResponse allow_nan=False，
+        一个 inf 整条 500（2026-10-08 SF 2:0 M2 实测触发）。
+        """
+        svc = self.batch_service()
+        svc.start("wrap", None, "wrap", None, rounds=2, max_plies=4)
+        self.addCleanup(svc.stop)
+        cur = svc._current
+        original = cur["handle"].status
+
+        def status_with_inf():
+            out = dict(original())
+            out["summary"] = {"elo": float("inf"), "score_a": 1.0,
+                              "elo_ci95": [3599.9999856265263, float("inf")],
+                              "nan_field": float("nan"),
+                              "nested": [{"x": float("-inf")}, [1.0, float("inf")]]}
+            return out
+
+        cur["handle"].status = status_with_inf
+        try:
+            snap = svc.snapshot()
+        finally:
+            cur["handle"].status = original
+        summary = snap["batch"]["summary"]
+        self.assertIsNone(summary["elo"])
+        self.assertIsNone(summary["nan_field"])
+        self.assertEqual(summary["score_a"], 1.0)                # 有限值原样保留
+        self.assertEqual(summary["elo_ci95"], [3599.9999856265263, None])
+        self.assertEqual(summary["nested"], [{"x": None}, [1.0, None]])
+        # 前置条件：整个响应体可被 allow_nan=False 序列化
+        json.dumps(snap, allow_nan=False)
+
     @unittest.skipUnless(_has_nvidia_smi(), "需要 nvidia-smi")
     def test_gpu_busy_refuses_start(self):
         svc = self.batch_service(gpu_mib=10_000_000)

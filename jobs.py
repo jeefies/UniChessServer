@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import math
 import secrets
 import shutil
 import sys
@@ -90,6 +91,29 @@ def _now() -> str:
 
 def _iso(ts: float) -> str:
     return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat()
+
+
+def _json_finite(value: Any) -> Any:
+    """把 ±inf / nan 降级成 None：starlette 的 JSONResponse 用 ``allow_nan=False``，
+    一个非有限浮点就会让整条 HTTP 响应变 500（ValueError: Out of range float values
+    are not JSON compliant）。
+
+    为什么必须兜这一层：``Kit.stats`` 的 Elo 哨兵值是 ``ELO_INF``（float('inf')）——
+    一方全胜或还没下完时汇总里必然出现（``elo`` / ``elo_ci95`` / ``elo_pentanomial`` /
+    ``elo_pentanomial_ci95``），job 的 status.json 用 Python 默认 json.dumps 写进去
+    （字面量 ``Infinity``），读回来原样进响应。与引擎强弱无关，是纯序列化问题；
+    SF 这种 baseline 会场场全胜，等于次次踩中（2026-10-08 SF 2:0 M2 触发过）。
+    降级成 None 而不是字符串：前端把 inf 当"还没有估计值"处理，数值语义不变。
+    """
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(k): _json_finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_finite(v) for v in value]
+    return value
 
 
 # ====================================================================== 引擎解析
@@ -305,7 +329,9 @@ class BatchService:
             cur = self._current
             if cur is None:
                 latest = self._storage.list_batches(limit=1)
-                return {"batch": latest[0] if latest else None, "workers": [], "is_running": False}
+                return _json_finite(
+                    {"batch": latest[0] if latest else None, "workers": [], "is_running": False}
+                )
             batch = dict(cur["row"], tally=dict(cur["row"]["tally"]))
             handle = cur["handle"]
             running = batch["status"] == "running"
@@ -313,7 +339,7 @@ class BatchService:
         batch["summary"] = status.get("summary")
         batch["job_state"] = status.get("state")
         workers = self._workers(handle, cur) if running else []
-        return {"batch": batch, "workers": workers, "is_running": running}
+        return _json_finite({"batch": batch, "workers": workers, "is_running": running})
 
     @staticmethod
     def _workers(handle: JobHandle, cur: dict) -> list[dict]:
@@ -439,7 +465,7 @@ class ArenaWatch:
                "in_check": self.board.is_check(), "san_history": list(self.san_history)}
         if data is None:
             out["turn"] = "white" if self.board.turn else "black"
-        return out
+        return _json_finite(out)
 
     def state(self) -> dict[str, Any]:
         with self._op_lock:
