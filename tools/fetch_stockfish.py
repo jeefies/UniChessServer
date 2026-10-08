@@ -25,7 +25,7 @@ import tarfile
 import tempfile
 import urllib.request
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 _RELEASE = 'sf_19'                    # GitHub release tag（Stockfish 19）
 _EXPECT_MAJOR = '19'                  # 安装后自报版本的主号，--check 用它做判据
@@ -92,28 +92,65 @@ def _probe_version(binary: Path) -> str | None:
     return None
 
 
-def _extract_binary(archive: Path, workdir: Path) -> Path:
+def _top_level_files(archive: Path):
+    """列出压缩包里 `stockfish/` 顶层目录下的普通文件（README/src/wiki/scripts 都在这里）。
+
+    release 资产的可执行文件名带平台后缀（`stockfish-linux-x86-64-universal`、
+    `stockfish-windows-x86-64-universal.exe`），不是裸 `stockfish`。
+    """
+    root = 'stockfish'
+    entries: list[tuple[str, int, int]] = []
     if archive.suffix == '.zip':
         with zipfile.ZipFile(archive) as zf:
-            names = [n for n in zf.namelist()
-                     if n.lower().endswith('.exe') or n.endswith('/stockfish')
-                     or Path(n).name == 'stockfish']
-            if not names:
-                raise SystemExit(f'{archive.name} 里没找到 stockfish 可执行文件')
-            target = next(n for n in names if Path(n).name == 'stockfish'
-                          or Path(n).name.endswith('stockfish.exe'))
-            out = workdir / Path(target).name
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                parts = PurePosixPath(info.filename).parts
+                if len(parts) == 2 and parts[0] == root:
+                    entries.append((info.filename, info.file_size, 0o644))
+    else:
+        with tarfile.open(archive, 'r:gz') as tf:
+            for member in tf.getmembers():
+                if not member.isfile():
+                    continue
+                parts = PurePosixPath(member.name).parts
+                if len(parts) == 2 and parts[0] == root:
+                    entries.append((member.name, member.size, member.mode))
+    return entries
+
+
+def _pick_binary(entries) -> str:
+    """从顶层文件里挑出引擎可执行文件。
+
+    Windows zip 没有权限位，先认 `.exe`；tar 认执行位；最后兜底取最大的
+    （二进制 100MB+，同目录其余文件都是几十 KB 的文本）。
+    """
+    if not entries:
+        raise SystemExit('压缩包里没找到 stockfish 顶层文件（结构变了？）')
+    executables = [e for e in entries if e[0].endswith('.exe')]
+    if executables:
+        return max(executables, key=lambda e: e[1])[0]
+    for name, _, mode in entries:
+        if mode & 0o111 and not name.endswith('.sh'):
+            return name
+    for name, size, _ in sorted(entries, key=lambda e: -e[1]):
+        if not name.endswith('.sh'):
+            return name
+    raise SystemExit('压缩包里没找到可执行文件（结构变了？）')
+
+
+def _extract_binary(archive: Path, workdir: Path) -> Path:
+    entries = _top_level_files(archive)
+    target = _pick_binary(entries)
+    if archive.suffix == '.zip':
+        with zipfile.ZipFile(archive) as zf:
+            out = workdir / PurePosixPath(target).name
             with zf.open(target) as src, out.open('wb') as dst:
                 shutil.copyfileobj(src, dst)
             return out
     with tarfile.open(archive, 'r:gz') as tf:
-        members = [m for m in tf.getmembers()
-                   if m.isfile() and Path(m.name).name == 'stockfish']
-        if not members:
-            raise SystemExit(f'{archive.name} 里没找到 stockfish 可执行文件')
-        member = members[0]
-        tf.extract(member, workdir)
-        return workdir / member.name
+        tf.extract(target, workdir)
+        return workdir / target
 
 
 def _download(url: str, dest: Path) -> None:
@@ -146,7 +183,7 @@ def main() -> int:
         print(f'校验通过：{installed} → {name}（release {_RELEASE}）')
         return 0
 
-    if _probe_version(installed) == f'Stockfish {_EXPECT_MAJOR}':
+    if installed.is_file() and _probe_version(installed) == f'Stockfish {_EXPECT_MAJOR}':
         print(f'已是最新：{installed}（Stockfish {_EXPECT_MAJOR}）')
         return 0
 
