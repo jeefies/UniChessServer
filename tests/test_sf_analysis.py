@@ -251,6 +251,45 @@ class StockfishAnalysisEngineTestCase(unittest.TestCase):
         self.assertIsNotNone(res2.get("opening"))
         self.assertFalse(res2["opening"]["theory"])
 
+    def test_syzygy_endgame_solve(self):
+        # 简单车残局 (KR vs K)，应迅速得出杀法或残局胜势
+        fen = "8/8/8/8/8/5k2/8/R3K3 w - - 0 1"
+        res = self.analyzer.analyze_move(
+            initial_fen=fen,
+            moves=[],
+            played_move="a1a3",
+            profile="lightning",
+            depth=22,
+            max_time_ms=600,
+        )
+        self.assertTrue(res["comparison"]["canCompare"])
+        # 若配置了 Syzygy，tbhits 应存在且非负
+        self.assertIn("tbhits", res["stats"])
+        self.assertGreaterEqual(res["stats"]["tbhits"], 0)
+        # 应找到正分/将杀 (白方车王胜单王)
+        best_score = res["best"]["score"]
+        if best_score.get("mate") is not None:
+            self.assertGreater(best_score["mate"], 0)
+        elif best_score.get("cp") is not None:
+            self.assertGreater(best_score["cp"], 500)
+
+    def test_blunder_cutoff(self):
+        # 挂后白送：1. e4 e5 2. Qh5 Nf6 3. Qxf7+ Kxf7，后送掉
+        res = self.analyzer.analyze_move(
+            initial_fen=None,
+            moves=["e2e4", "e7e5", "d1h5", "g8f6"],
+            played_move="h5f7",
+            profile="lightning",
+            depth=16,
+            max_time_ms=1000,
+        )
+        self.assertTrue(res["comparison"]["canCompare"])
+        self.assertEqual(res["played"]["move"], "h5f7")
+        # 挂后后分数暴跌，diffCp 为严重负分
+        diff_cp = res["comparison"]["diffCp"]
+        if diff_cp is not None:
+            self.assertLessEqual(diff_cp, -500)
+
 
 class SfApiRoutesIntegrationTestCase(unittest.TestCase):
     """FastAPI 路由与鉴权集成测试。"""
