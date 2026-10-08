@@ -200,7 +200,10 @@ class RouteTableTestCase(unittest.TestCase):
         )
 
     def test_every_api_route_is_gated(self):
-        api_routes = [r for r in self._routes() if r.path.startswith("/api/")]
+        api_routes = [
+            r for r in self._routes()
+            if r.path.startswith("/api/") and not r.path.endswith("/openapi.json")
+        ]
         self.assertGreaterEqual(len(api_routes), 17)
         ungated = sorted(r.path for r in api_routes if not self._gated(r))
         self.assertEqual(ungated, [], f"这些 /api 路由漏挂门禁: {ungated}")
@@ -215,11 +218,25 @@ class RouteTableTestCase(unittest.TestCase):
         gated = sorted(r.path for r in page_routes if self._gated(r))
         self.assertEqual(gated, [], f"这些页面路由不该有门禁: {gated}")
 
-    def test_every_sf_route_is_gated(self):
-        sf_routes = [r for r in self._routes() if r.path.startswith("/sf/")]
+    def test_every_sf_compute_route_is_gated(self):
+        # 所有实际执行 Stockfish 计算的接口必须强制挂门禁
+        sf_routes = [
+            r for r in self._routes()
+            if r.path.startswith("/sf/") and not r.path.endswith("/openapi.json")
+        ]
         self.assertGreaterEqual(len(sf_routes), 3)
         ungated = sorted(r.path for r in sf_routes if not self._gated(r))
-        self.assertEqual(ungated, [], f"这些 /sf 路由漏挂门禁: {ungated}")
+        self.assertEqual(ungated, [], f"这些 /sf 算力路由漏挂门禁: {ungated}")
+
+    def test_sf_openapi_is_public(self):
+        # /sf/v1/openapi.json 与 /api/sf/v1/openapi.json 专供 AI / Agent 读取规范，不需要门禁
+        open_routes = [
+            r for r in self._routes()
+            if r.path in ("/sf/v1/openapi.json", "/api/sf/v1/openapi.json")
+        ]
+        self.assertEqual(len(open_routes), 2)
+        for r in open_routes:
+            self.assertFalse(self._gated(r), f"{r.path} 不应该挂门禁")
 
     def test_docs_and_openapi_disabled(self):
         paths = {r.path for r in self._routes()}

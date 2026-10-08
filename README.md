@@ -36,14 +36,14 @@
 - `GET /sf/v1/health` → 引擎就绪状态、版本及支持参数上限
 - `POST /sf/v1/evaluate` → 任意局面的 MultiPV 综合评估及候选走法
 - `POST /sf/v1/analyze-move` → 最佳走法与实战走法的同深度对拍比对
-- `GET /sf/v1/openapi.json` → 专供 AI / Agent / GPT Actions 消费的完整 OpenAPI 3.1 规格描述
+- `GET /sf/v1/openapi.json` → 专供 AI / Agent / GPT Actions 消费的完整 OpenAPI 3.1 规格描述（公开端点，无需口令，便于外部 AI 平台直接 Import from URL）
 
 计算规则与协议特性：
 - **无状态局面重构**：通过 `initialFen` 与 `moves` 列表完整复原棋局，准确判定三次重复局面与 50 步规则。
 - **统一行棋方视角**：分数（厘兵 `cp` 或步数 `mate`）及 `wdl`（千分比，总和 1000）均以根局面当前行棋方为准。
 - **同深度对拍**：首阶段 MultiPV 搜索；若实战走法不在候选中，在剩余时间预算内以 `searchmoves` 补搜，并在**共同完成深度（commonDepth）**下对齐比较，绝不跨深度比较。
 - **标准深度 128**：深度上限固定为 128，总时间预算覆盖全部搜索流程，诚实返回实际完成深度。
-- **双协议鉴权**：同时兼容 `Authorization: Bearer <token>` 与 `X-Access-Token: <token>`，本机直连免口令。
+- **双协议鉴权**：计算与评估接口同时兼容 `Authorization: Bearer <token>` 与 `X-Access-Token: <token>`，本机直连免口令；`openapi.json` 规范端点免口令开放。
 
 错误码：401 访问口令缺失/错误（见下节）；404 模型名非法/不存在或会话不存在（已被淘汰）；400 预设不存在、FEN 非法、走法不合法或轮到引擎；501 引擎未接入（`IMPLEMENTED=False`）；500 其它异常（detail 形如 `"ExceptionType: message"`）。
 
