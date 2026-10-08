@@ -36,6 +36,7 @@
 - `GET /sf/v1/health` → 引擎就绪状态、版本及支持参数上限
 - `POST /sf/v1/evaluate` → 任意局面的 MultiPV 综合评估及候选走法
 - `POST /sf/v1/analyze-move` → 最佳走法与实战走法的同深度对拍比对
+- `GET /sf/v1/openapi.json` → 专供 AI / Agent / GPT Actions 消费的完整 OpenAPI 3.1 规格描述
 
 计算规则与协议特性：
 - **无状态局面重构**：通过 `initialFen` 与 `moves` 列表完整复原棋局，准确判定三次重复局面与 50 步规则。

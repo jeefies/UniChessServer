@@ -7,12 +7,12 @@
 - Python：`/home/jeefy/miniconda3/envs/unichess/bin/python`（无 pytest，全部用标准库 `unittest`）
 - 无 `pyproject.toml` / `requirements.txt` / CI：直接 `python app.py` 运行
 - 启动：`python app.py --host 127.0.0.1 --port 8000`（仅接受 `--host/--port`）
-- 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；188 项，
+- 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；189 项，
   其中访问门禁 29 项 / M3 19 项 / M2 24 项 / DS 15 项 / jobs 34 项 / server 28 项 /
-  SF 对弈 22 项 / SF 分析 17 项）。
+  SF 对弈 22 项 / SF 分析 18 项）。
   Windows 本机有 4 项必失败：3 项符号链接权限 + 1 项 `../M2` 包不在本机
   （`describe_model('M2')` 报 error），都与门禁无关，干净树上同样失败；
-  远端 188 项全绿（SF 前提：装好二进制，见「SF 接线」）
+  远端 189 项全绿（SF 前提：装好二进制，见「SF 接线」）
 - **批量对弈汇总里的 `inf` 不能进 HTTP 响应**：`Kit.stats` 的 Elo 哨兵是 `ELO_INF`
   （`float('inf')`），一方全胜/还没下完时汇总里必然出现（`elo` / `elo_ci95` /
   `elo_pentanomial*`），job 的 status.json 原样带出来。starlette 的 JSONResponse

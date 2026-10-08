@@ -293,6 +293,26 @@ class SfApiRoutesIntegrationTestCase(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Illegal playedMove", resp.json()["detail"])
 
+    def test_openapi_json_endpoint(self):
+        if not _HAS_TESTCLIENT:
+            raise unittest.SkipTest("starlette TestClient 不可用")
+        client = TestClient(app.app)
+        resp = client.get(
+            "/sf/v1/openapi.json",
+            headers={"Authorization": "Bearer sf-token-123", "x-forwarded-for": "1.2.3.4"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("openapi", data)
+        self.assertIn("/sf/v1/analyze-move", data["paths"])
+        self.assertIn("/sf/v1/evaluate", data["paths"])
+        self.assertIn("/sf/v1/health", data["paths"])
+        schemas = data["components"]["schemas"]
+        self.assertIn("AnalyzeMoveRequest", schemas)
+        self.assertIn("AnalyzeMoveResponse", schemas)
+        self.assertIn("ComparisonResult", schemas)
+        self.assertIn("ScoreDetail", schemas)
+
 
 if __name__ == "__main__":
     unittest.main()
