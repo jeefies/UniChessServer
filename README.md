@@ -41,8 +41,10 @@
 计算规则与协议特性：
 - **无状态局面重构**：通过 `initialFen` 与 `moves` 列表完整复原棋局，准确判定三次重复局面与 50 步规则。
 - **统一行棋方视角**：分数（厘兵 `cp` 或步数 `mate`）及 `wdl`（千分比，总和 1000）均以根局面当前行棋方为准。
-- **双路并发同深度对拍**：双引擎实例并行推演（主引擎 MultiPV 候选 + 辅助引擎定向推演），将非候选实战走法的对拍耗时降低 50% 以上；并在**共同完成深度（commonDepth）**下对齐比较，绝不跨深度比较。
-- **多档预设与标准深度**：支持 `lightning`（目标 22 层 / 600ms）、`fast`（目标 22 层 / 1000ms）、`standard`（标准 128 层 / 4s）、`deep` 与 `ultra`，开局与常规中局 500ms 内即可触达 22 层。
+- **双路并发同深度对拍**：双引擎实例并行推演（主引擎 MultiPV 候选 + 辅助引擎定向推演），并在**共同完成深度（commonDepth）**下对齐比较；支持实战大漏勺提前收敛截断（blunder cutoff）。
+- **Syzygy 残局库无缝集成**：服务端自动挂载 3-4-5 子 Syzygy 残局表（`SyzygyProbeDepth: 1`），残局局面毫秒级直接给出必杀/必和精准步数，并在 `stats` 中回报 `tbhits`。
+- **开局定式与体系识别**：集成常用定式前缀与 Kit 开局库，精准标记 `opening` 名称、定式匹配步数与 `theory: true/false`。
+- **极速档位与毫秒级达成**：支持 `lightning`（目标 22 层 / 500ms 硬顶、单候选+实战并行，实测 300–500ms 达成 22 层）、`fast`（目标 22 层 / 1000ms / 双候选）、`standard`（标准 128 层 / 4s）、`deep` 与 `ultra`。达成目标深度即刻退出，绝不空耗时间。
 - **双协议鉴权**：计算与评估接口同时兼容 `Authorization: Bearer <token>` 与 `X-Access-Token: <token>`，本机直连免口令；`openapi.json` 规范端点免口令开放。
 
 错误码：401 访问口令缺失/错误（见下节）；404 模型名非法/不存在或会话不存在（已被淘汰）；400 预设不存在、FEN 非法、走法不合法或轮到引擎；501 引擎未接入（`IMPLEMENTED=False`）；500 其它异常（detail 形如 `"ExceptionType: message"`）。
@@ -306,7 +308,7 @@ M3 的 `policy` 档就是这么加的（`models/M3.local.json`）。
 
 在 Server 目录下运行。
 
-- 远端 169 项全绿（含 SF 22 项；前提是先跑过 `tools/fetch_stockfish.py`）。
+- 远端 192 项全绿（含 SF 对弈 22 项、SF 分析 20 项；前提是先跑过 `tools/fetch_stockfish.py`）。
 - Windows 本机：4 项必失败（3 项符号链接权限 + 1 项 `../M2` 包不在本机，
   `describe_model('M2')` 报 error），都与门禁无关，干净树上同样失败；
   SF 的用例在装了 `tools/stockfish.exe` 的本机照常跑，没装二进制时整体 skip
