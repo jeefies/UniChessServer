@@ -105,10 +105,15 @@ class AccessGateTestCase(unittest.TestCase):
     def test_valid_token_allowed_from_anywhere(self):
         self._allowed(x_access_token="s3cret-access", cf_connecting_ip="203.0.113.9")
 
+    def test_bearer_token_allowed_from_anywhere(self):
+        self._allowed(authorization="Bearer s3cret-access", cf_connecting_ip="203.0.113.9")
+
     def test_missing_or_wrong_token_denied(self):
         self._denied()
         self._denied(x_access_token="nope")
         self._denied(x_access_token="")
+        self._denied(authorization="Bearer wrong-secret")
+        self._denied(authorization="Basic dXNlcjpwYXNz")
 
     def test_truncated_token_denied(self):
         # 防止有人把 compare_digest 换成 startswith
@@ -194,10 +199,19 @@ class RouteTableTestCase(unittest.TestCase):
 
     def test_page_routes_are_not_gated(self):
         # 浏览器打开文档时带不了自定义请求头，这些必须保持开放
-        page_routes = [r for r in self._routes() if not r.path.startswith("/api/")]
+        page_routes = [
+            r for r in self._routes()
+            if not r.path.startswith("/api/") and not r.path.startswith("/sf/")
+        ]
         self.assertTrue(page_routes)
         gated = sorted(r.path for r in page_routes if self._gated(r))
         self.assertEqual(gated, [], f"这些页面路由不该有门禁: {gated}")
+
+    def test_every_sf_route_is_gated(self):
+        sf_routes = [r for r in self._routes() if r.path.startswith("/sf/")]
+        self.assertGreaterEqual(len(sf_routes), 3)
+        ungated = sorted(r.path for r in sf_routes if not self._gated(r))
+        self.assertEqual(ungated, [], f"这些 /sf 路由漏挂门禁: {ungated}")
 
     def test_docs_and_openapi_disabled(self):
         paths = {r.path for r in self._routes()}

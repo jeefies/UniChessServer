@@ -29,6 +29,21 @@
 - `GET /favicon.ico` → 站点图标（文件是 `static/favicon.jpg`，与 blog.jeefy.top 同一个文件，
   上游是 JPEG 所以按 `image/jpeg` 提供；三个页面都用 `<link rel="icon">` 指向它）
 
+### Stockfish 远端分析服务（/sf/v1/*）
+
+面向移动端/外部客户端的无状态分析微服务，统一 `sf` 前缀（支持 `/api/sf/v1/*` 别名）：
+
+- `GET /sf/v1/health` → 引擎就绪状态、版本及支持参数上限
+- `POST /sf/v1/evaluate` → 任意局面的 MultiPV 综合评估及候选走法
+- `POST /sf/v1/analyze-move` → 最佳走法与实战走法的同深度对拍比对
+
+计算规则与协议特性：
+- **无状态局面重构**：通过 `initialFen` 与 `moves` 列表完整复原棋局，准确判定三次重复局面与 50 步规则。
+- **统一行棋方视角**：分数（厘兵 `cp` 或步数 `mate`）及 `wdl`（千分比，总和 1000）均以根局面当前行棋方为准。
+- **同深度对拍**：首阶段 MultiPV 搜索；若实战走法不在候选中，在剩余时间预算内以 `searchmoves` 补搜，并在**共同完成深度（commonDepth）**下对齐比较，绝不跨深度比较。
+- **标准深度 128**：深度上限固定为 128，总时间预算覆盖全部搜索流程，诚实返回实际完成深度。
+- **双协议鉴权**：同时兼容 `Authorization: Bearer <token>` 与 `X-Access-Token: <token>`，本机直连免口令。
+
 错误码：401 访问口令缺失/错误（见下节）；404 模型名非法/不存在或会话不存在（已被淘汰）；400 预设不存在、FEN 非法、走法不合法或轮到引擎；501 引擎未接入（`IMPLEMENTED=False`）；500 其它异常（detail 形如 `"ExceptionType: message"`）。
 
 ## 鉴权：两道彼此独立的门禁

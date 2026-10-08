@@ -50,6 +50,8 @@ import arena_storage as a_storage
 import jobs
 import models as model_registry
 import session_manager as sm
+import sf_analyzer
+import sf_router
 
 # docs/openapi/redoc 一律关闭：全部接口都要访问口令，没必要再对外暴露接口清单。
 app = FastAPI(
@@ -367,11 +369,17 @@ def _stop_job_monitor():
     if monitor is not None:
         monitor.stop()
     jobs.arena_service().close_all()
+    sf_analyzer.get_analyzer().close()
 
 
 @app.get("/api/health", dependencies=[Depends(require_access_token)])
 def health():
     return {"status": "ok", "models": model_registry.available_models()}
+
+
+# 挂载 Stockfish 远端分析服务路由（统一 /sf/v1 前缀与 /api/sf/v1 别名）
+app.include_router(sf_router.router)
+app.include_router(sf_router.api_router)
 
 
 # 静态前端（对局页），迁移自旧 unichess-server。

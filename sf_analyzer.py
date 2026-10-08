@@ -1,0 +1,695 @@
+"""Stockfish 远端分析服务核心引擎（/sf/v1/*）。
+
+实现需求文档 Server/wants.md 的无状态局面与单步深度分析：
+1. 完整历史局面重构（支持判断三次重复局面）；
+2. 统一行棋方视角（score/wdl 均为根局面当前行棋方视角）；
+3. 同深度对拍算法（MultiPV 搜索 + 必要时 searchmoves 补搜，对齐共同完成深度）；
+4. 标准深度上限固定为 128，总耗时预算覆盖全流程并如实上报实际完成深度；
+5. 进程复用、排队互斥、即时取消、故障自愈与 LRU 结果缓存。
+"""
+from __future__ import annotations
+
+import collections
+import logging
+import os
+import threading
+import time
+from typing import Any
+
+import chess
+import chess.engine
+
+from models.SF.engine import STOCKFISH_VERSION, default_binary, _resolve_binary
+
+logger = logging.getLogger("unichess.sf_analyzer")
+
+STANDARD_DEPTH = 128
+DEFAULT_MAX_TIME_MS = 4000
+DEFAULT_MULTI_PV = 2
+DEFAULT_MAX_PV_PLIES = 12
+DEFAULT_THREADS = int(os.environ.get("UNICHESS_SF_THREADS", "4"))
+DEFAULT_HASH_MB = int(os.environ.get("UNICHESS_SF_HASH_MB", "512"))
+DEFAULT_CACHE_SIZE = int(os.environ.get("UNICHESS_SF_CACHE_SIZE", "500"))
+
+# 预设档位（profile）
+PROFILES: dict[str, dict[str, Any]] = {
+    "fast": {
+        "depth": STANDARD_DEPTH,
+        "maxTimeMs": 1500,
+        "multiPv": 2,
+        "maxPvPlies": 10,
+        "description": "快档：1.5 秒预算，适合快速粗评与移动端低延时交互。",
+    },
+    "standard": {
+        "depth": STANDARD_DEPTH,
+        "maxTimeMs": 4000,
+        "multiPv": 2,
+        "maxPvPlies": 12,
+        "description": "标准档：4.0 秒预算，标准深度 128，兼顾深度与响应速度。",
+    },
+    "deep": {
+        "depth": STANDARD_DEPTH,
+        "maxTimeMs": 4000,
+        "multiPv": 2,
+        "maxPvPlies": 12,
+        "description": "深度档：同标准档，深度上限 128、4 秒总时间预算。",
+    },
+    "ultra": {
+        "depth": STANDARD_DEPTH,
+        "maxTimeMs": 10000,
+        "multiPv": 2,
+        "maxPvPlies": 16,
+        "description": "超深档：10 秒高预算，用于关键着法深度推演。",
+    },
+}
+
+
+def reconstruct_board(initial_fen: str | None, moves: list[str]) -> chess.Board:
+    """根据起始 FEN 和完整 UCI 走法历史重构棋局。
+
+    确保包含完整的历史状态（支持精确判断三次重复局面与 50 步和棋）。
+    """
+    if initial_fen and initial_fen.strip():
+        try:
+            board = chess.Board(initial_fen.strip())
+        except ValueError as exc:
+            raise ValueError(f"Invalid initialFen: {initial_fen!r}") from exc
+        if not board.is_valid():
+            raise ValueError(f"Invalid initialFen position: {initial_fen!r}")
+    else:
+        board = chess.Board()
+
+    for idx, uci in enumerate(moves):
+        if not isinstance(uci, str):
+            raise TypeError(f"History move at index {idx} must be string, got {type(uci).__name__}")
+        try:
+            move = chess.Move.from_uci(uci.strip())
+        except ValueError as exc:
+            raise ValueError(f"Invalid UCI move at index {idx}: {uci!r}") from exc
+        if move not in board.legal_moves:
+            raise ValueError(f"Illegal move at index {idx} ({uci!r}) in history")
+        board.push(move)
+
+    return board
+
+
+def _format_eval_item(
+    info: dict[str, Any],
+    max_pv_plies: int = DEFAULT_MAX_PV_PLIES,
+    override_move: str | None = None,
+) -> dict[str, Any]:
+    """将 python-chess 的 info 字段格式化为统一行棋方视角的评价对象。"""
+    score = info.get("score")
+    wdl = info.get("wdl")
+
+    score_dict: dict[str, Any] | None = None
+    if score is not None:
+        rel = score.relative
+        mate = rel.mate()
+        cp = rel.score()
+        if mate is not None:
+            score_dict = {"type": "mate", "value": mate}
+        elif cp is not None:
+            score_dict = {"type": "cp", "value": cp}
+
+    wdl_dict: dict[str, Any] | None = None
+    if wdl is not None:
+        rel_wdl = wdl.relative
+        wdl_dict = {
+            "win": rel_wdl.wins,
+            "draw": rel_wdl.draws,
+            "loss": rel_wdl.losses,
+        }
+
+    raw_pv = info.get("pv") or []
+    pv_uci = [m.uci() for m in raw_pv][:max_pv_plies]
+
+    move_uci = override_move
+    if not move_uci and pv_uci:
+        move_uci = pv_uci[0]
+
+    return {
+        "move": move_uci,
+        "depth": info.get("depth", 0),
+        "seldepth": info.get("seldepth"),
+        "score": score_dict,
+        "wdl": wdl_dict,
+        "pv": pv_uci,
+    }
+
+
+class StockfishAnalyzer:
+    """Stockfish 常驻分析服务：排队调度、流式监听、同深度对拍及缓存。"""
+
+    def __init__(
+        self,
+        binary: str | None = None,
+        threads: int = DEFAULT_THREADS,
+        hash_mb: int = DEFAULT_HASH_MB,
+        cache_size: int = DEFAULT_CACHE_SIZE,
+    ) -> None:
+        self.binary_path = _resolve_binary(binary)
+        self.threads = threads
+        self.hash_mb = hash_mb
+        self._lock = threading.Lock()
+        self._engine: chess.engine.SimpleEngine | None = None
+        self._engine_identity: str = "Stockfish"
+        self._cache: collections.OrderedDict[tuple, dict[str, Any]] = collections.OrderedDict()
+        self._cache_size = cache_size
+        self._current_cancel_event: threading.Event | None = None
+        self._current_analysis: Any | None = None
+        self._current_request_id: str | None = None
+
+    def _ensure_engine(self) -> chess.engine.SimpleEngine:
+        """确保底层 UCI 引擎正常存活，若未启动或崩溃则重启。"""
+        if self._engine is not None:
+            # 探测进程是否存活
+            try:
+                poll = getattr(self._engine.transport, "get_returncode", None)
+                if callable(poll) and poll() is not None:
+                    self._engine = None
+            except Exception:
+                self._engine = None
+
+        if self._engine is None:
+            logger.info("正在启动 Stockfish UCI 分析子进程: %s", self.binary_path)
+            engine = chess.engine.SimpleEngine.popen_uci(self.binary_path)
+            identity = str(engine.id.get("name") or "Stockfish")
+            if STOCKFISH_VERSION and STOCKFISH_VERSION not in identity:
+                identity = f"{identity} (SF {STOCKFISH_VERSION})"
+            self._engine_identity = identity
+
+            engine.configure({
+                "Threads": self.threads,
+                "Hash": self.hash_mb,
+                "Move Overhead": 10,
+            })
+            try:
+                engine.configure({"UCI_ShowWDL": True})
+            except Exception as exc:
+                logger.warning("UCI_ShowWDL 配置失败: %s", exc)
+
+            self._engine = engine
+
+        return self._engine
+
+    def cancel(self, request_id: str | None = None) -> bool:
+        """中断当前正在运行的分析（若匹配 requestId 或未指定）。"""
+        with self._lock:
+            if self._current_cancel_event is not None:
+                if request_id is None or self._current_request_id == request_id:
+                    self._current_cancel_event.set()
+                    if self._current_analysis is not None:
+                        try:
+                            self._current_analysis.stop()
+                        except Exception:
+                            pass
+                    return True
+    def _get_identity(self) -> str:
+        """获取稳定的引擎版本与名称标识。"""
+        with self._lock:
+            if self._engine is None:
+                self._ensure_engine()
+            return self._engine_identity
+
+    def get_health_info(self) -> dict[str, Any]:
+        """返回引擎就绪状态与配置。"""
+        with self._lock:
+            try:
+                self._ensure_engine()
+                status = "ok"
+            except Exception as exc:
+                status = "error"
+                logger.exception("Stockfish 就绪探测异常: %s", exc)
+
+            return {
+                "status": status,
+                "engine": {
+                    "name": self._engine_identity,
+                    "version": STOCKFISH_VERSION,
+                    "binary": str(self.binary_path),
+                    "threads": self.threads,
+                    "hashMb": self.hash_mb,
+                    "nnue": True,
+                    "showWdl": True,
+                },
+                "defaults": {
+                    "standardDepth": STANDARD_DEPTH,
+                    "maxTimeMs": DEFAULT_MAX_TIME_MS,
+                    "multiPv": DEFAULT_MULTI_PV,
+                    "maxPvPlies": DEFAULT_MAX_PV_PLIES,
+                },
+                "profiles": {
+                    k: {
+                        "depth": v["depth"],
+                        "maxTimeMs": v["maxTimeMs"],
+                        "multiPv": v["multiPv"],
+                        "description": v["description"],
+                    }
+                    for k, v in PROFILES.items()
+                },
+                "limits": {
+                    "maxDepth": STANDARD_DEPTH,
+                    "maxTimeMs": 60000,
+                    "maxMultiPv": 10,
+                },
+            }
+
+    def _get_from_cache(self, key: tuple) -> dict[str, Any] | None:
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+        return None
+
+    def _put_to_cache(self, key: tuple, value: dict[str, Any]) -> None:
+        with self._lock:
+            self._cache[key] = value
+            self._cache.move_to_end(key)
+            if len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+
+    def analyze_move(
+        self,
+        initial_fen: str | None,
+        moves: list[str],
+        played_move: str,
+        profile: str | None = None,
+        depth: int | None = None,
+        max_time_ms: int | None = None,
+        multi_pv: int | None = None,
+        max_pv_plies: int | None = None,
+        request_id: str | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """分析实战中的某一步，完成最佳与实战走法的同深度对拍。"""
+        # 1. 局面重构与着法校验
+        board = reconstruct_board(initial_fen, moves)
+        if board.is_game_over(claim_draw=True):
+            raise ValueError("Position is already terminal (checkmate or draw)")
+
+        try:
+            played_move_obj = chess.Move.from_uci(played_move.strip())
+        except ValueError as exc:
+            raise ValueError(f"Invalid UCI playedMove: {played_move!r}") from exc
+
+        if played_move_obj not in board.legal_moves:
+            raise ValueError(f"Illegal playedMove {played_move!r} for current position")
+
+        # 2. 参数解析（继承 profile 与默认值）
+        prof_cfg = PROFILES.get(profile or "standard", PROFILES["standard"])
+        effective_depth = STANDARD_DEPTH if depth is None else int(depth)
+        effective_max_time_ms = prof_cfg["maxTimeMs"] if max_time_ms is None else int(max_time_ms)
+        effective_multi_pv = prof_cfg["multiPv"] if multi_pv is None else max(1, int(multi_pv))
+        effective_max_pv_plies = (
+            prof_cfg.get("maxPvPlies", DEFAULT_MAX_PV_PLIES)
+            if max_pv_plies is None
+            else max(1, int(max_pv_plies))
+        )
+
+        # 3. 检查缓存
+        engine_id = self._get_identity()
+        cache_key = (
+            "analyze_move",
+            initial_fen or "",
+            tuple(moves),
+            played_move.strip(),
+            effective_depth,
+            effective_max_time_ms,
+            effective_multi_pv,
+            effective_max_pv_plies,
+            engine_id,
+        )
+        cached = self._get_from_cache(cache_key)
+        if cached is not None:
+            result = dict(cached)
+            result["stats"] = dict(result["stats"])
+            result["stats"]["cached"] = True
+            result["requestId"] = request_id
+            return result
+
+        # 4. 进入排队与引擎互斥执行
+        start_time = time.perf_counter()
+        with self._lock:
+            local_cancel = cancel_event or threading.Event()
+            self._current_cancel_event = local_cancel
+            self._current_request_id = request_id
+            try:
+                engine = self._ensure_engine()
+                res = self._execute_move_analysis(
+                    engine=engine,
+                    board=board,
+                    played_move_obj=played_move_obj,
+                    depth=effective_depth,
+                    max_time_ms=effective_max_time_ms,
+                    multi_pv=effective_multi_pv,
+                    max_pv_plies=effective_max_pv_plies,
+                    cancel_event=local_cancel,
+                )
+            except chess.engine.EngineTerminatedError:
+                logger.error("Stockfish 引擎在分析中异常退出，尝试重建")
+                self._engine = None
+                raise RuntimeError("Stockfish engine terminated unexpectedly")
+            finally:
+                self._current_cancel_event = None
+                self._current_analysis = None
+                self._current_request_id = None
+
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        res["requestId"] = request_id
+        res["engine"] = {
+            "name": self._engine_identity,
+            "profile": profile or "standard",
+            "threads": self.threads,
+            "hashMb": self.hash_mb,
+        }
+        res["stats"]["elapsedMs"] = elapsed_ms
+        res["stats"]["cached"] = False
+
+        # 写入缓存
+        self._put_to_cache(cache_key, res)
+        return res
+
+    def _execute_move_analysis(
+        self,
+        engine: chess.engine.SimpleEngine,
+        board: chess.Board,
+        played_move_obj: chess.Move,
+        depth: int,
+        max_time_ms: int,
+        multi_pv: int,
+        max_pv_plies: int,
+        cancel_event: threading.Event,
+    ) -> dict[str, Any]:
+        """两阶段执行同深度对拍。"""
+        played_uci = played_move_obj.uci()
+        total_time_s = max(0.1, max_time_ms / 1000.0)
+
+        # 阶段一时间预算：合理留给阶段二 searchmoves 补搜
+        if total_time_s >= 2.0:
+            step1_time_s = total_time_s * 0.65
+        elif total_time_s >= 1.0:
+            step1_time_s = total_time_s * 0.55
+        else:
+            step1_time_s = max(0.05, total_time_s * 0.50)
+
+        step1_history: dict[int, dict[int, dict[str, Any]]] = collections.defaultdict(dict)
+        last_info: dict[str, Any] = {}
+
+        t0 = time.perf_counter()
+
+        # --- 阶段一：MultiPV 根局面搜索 ---
+        with engine.analysis(
+            board,
+            chess.engine.Limit(depth=depth, time=step1_time_s),
+            multipv=multi_pv,
+        ) as analysis:
+            self._current_analysis = analysis
+            for info in analysis:
+                if cancel_event.is_set():
+                    analysis.stop()
+                    break
+                d = info.get("depth")
+                mpv = info.get("multipv")
+                if d is not None and mpv is not None:
+                    step1_history[d][mpv] = _format_eval_item(info, max_pv_plies)
+                    last_info = info
+
+        # 找出阶段一已完成的最佳深度 D1（优先选 MultiPV 全部分支已跑完的深度）
+        d_full = sorted([d for d, m in step1_history.items() if len(m) >= multi_pv])
+        if d_full:
+            d1 = d_full[-1]
+        else:
+            d_candidates = sorted([d for d, m in step1_history.items() if 1 in m])
+            if not d_candidates:
+                d1 = last_info.get("depth", 1)
+                step1_history[d1][1] = _format_eval_item(last_info, max_pv_plies)
+            else:
+                d1 = d_candidates[-1]
+
+        # 检查 playedMove 是否在阶段一的 MultiPV 候选中
+        played_in_candidates = False
+        played_eval_step1: dict[str, Any] | None = None
+        for rank, item in step1_history[d1].items():
+            if item.get("move") == played_uci:
+                played_in_candidates = True
+                played_eval_step1 = item
+                break
+
+        step2_run = False
+        step2_history: dict[int, dict[str, Any]] = {}
+        elapsed_step1 = time.perf_counter() - t0
+        remain_time_s = max(0.0, total_time_s - elapsed_step1)
+
+        # --- 阶段二：若实战着法不在候选中，在剩余时间内定向搜索 ---
+        if not played_in_candidates and remain_time_s >= 0.03 and not cancel_event.is_set():
+            step2_run = True
+            with engine.analysis(
+                board,
+                chess.engine.Limit(depth=d1, time=remain_time_s),
+                root_moves=[played_move_obj],
+            ) as analysis_played:
+                self._current_analysis = analysis_played
+                for info in analysis_played:
+                    if cancel_event.is_set():
+                        analysis_played.stop()
+                        break
+                    d = info.get("depth")
+                    if d is not None:
+                        step2_history[d] = _format_eval_item(
+                            info, max_pv_plies, override_move=played_uci
+                        )
+                        last_info = info
+
+        # 兜底：若实战走法既不在候选且阶段二未产生深度记录，补一次极浅同步评估
+        if not played_in_candidates and not step2_history and not cancel_event.is_set():
+            try:
+                res_quick = engine.analyse(
+                    board, chess.engine.Limit(depth=min(5, d1)), root_moves=[played_move_obj]
+                )
+                step2_history[res_quick.get("depth", 1)] = _format_eval_item(
+                    res_quick, max_pv_plies, override_move=played_uci
+                )
+                step2_run = True
+            except Exception as exc:
+                logger.warning("实战走法兜底评估失败: %s", exc)
+
+        # 确定共同完成深度 common_depth
+        if played_in_candidates:
+            common_depth = d1
+            best_eval = step1_history[d1][1]
+            played_eval = played_eval_step1
+            second_eval = step1_history[d1].get(2)
+            can_compare = True
+        elif step2_run and step2_history:
+            d2 = max(step2_history.keys())
+            common_depth = min(d1, d2)
+            # 对齐到 common_depth 深度下的数据
+            target_step1 = step1_history.get(common_depth, step1_history[d1])
+            best_eval = target_step1.get(1, step1_history[d1][1])
+            second_eval = target_step1.get(2)
+            played_eval = step2_history.get(common_depth, step2_history[d2])
+            can_compare = True
+        else:
+            # 剩余时间用尽或未启动阶段二
+            common_depth = d1
+            best_eval = step1_history[d1][1]
+            second_eval = step1_history[d1].get(2)
+            played_eval = None
+            can_compare = False
+
+        # previousBest：共同深度 - 1 的最佳走法
+        prev_depth = common_depth - 1
+        previous_best = None
+        if prev_depth > 0 and prev_depth in step1_history:
+            previous_best = step1_history[prev_depth].get(1)
+
+        # 比对指标计算
+        diff_cp: int | None = None
+        diff_wdl_loss: int | None = None
+        if can_compare and played_eval and best_eval:
+            best_score = best_eval.get("score")
+            played_score = played_eval.get("score")
+            if (
+                best_score
+                and played_score
+                and best_score.get("type") == "cp"
+                and played_score.get("type") == "cp"
+            ):
+                diff_cp = played_score["value"] - best_score["value"]
+
+            best_wdl = best_eval.get("wdl")
+            played_wdl = played_eval.get("wdl")
+            if best_wdl and played_wdl:
+                # 行棋方视角下：实战招法劣于最佳招法时，loss 增加
+                diff_wdl_loss = played_wdl["loss"] - best_wdl["loss"]
+
+        comparison = {
+            "canCompare": can_compare,
+            "commonDepth": common_depth,
+            "diffCp": diff_cp,
+            "diffWdlLoss": diff_wdl_loss,
+        }
+
+        stats = {
+            "nodes": last_info.get("nodes"),
+            "nps": last_info.get("nps"),
+            "hashfull": last_info.get("hashfull"),
+        }
+
+        return {
+            "best": best_eval,
+            "played": played_eval,
+            "second": second_eval,
+            "previousBest": previous_best,
+            "comparison": comparison,
+            "stats": stats,
+        }
+
+    def evaluate(
+        self,
+        initial_fen: str | None,
+        moves: list[str],
+        profile: str | None = None,
+        depth: int | None = None,
+        max_time_ms: int | None = None,
+        multi_pv: int | None = None,
+        max_pv_plies: int | None = None,
+        request_id: str | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """对任意历史局面进行 MultiPV 综合评估。"""
+        board = reconstruct_board(initial_fen, moves)
+        if board.is_game_over(claim_draw=True):
+            raise ValueError("Position is already terminal (checkmate or draw)")
+
+        prof_cfg = PROFILES.get(profile or "standard", PROFILES["standard"])
+        effective_depth = STANDARD_DEPTH if depth is None else int(depth)
+        effective_max_time_ms = prof_cfg["maxTimeMs"] if max_time_ms is None else int(max_time_ms)
+        effective_multi_pv = prof_cfg["multiPv"] if multi_pv is None else max(1, int(multi_pv))
+        effective_max_pv_plies = (
+            prof_cfg.get("maxPvPlies", DEFAULT_MAX_PV_PLIES)
+            if max_pv_plies is None
+            else max(1, int(max_pv_plies))
+        )
+
+        engine_id = self._get_identity()
+        cache_key = (
+            "evaluate",
+            initial_fen or "",
+            tuple(moves),
+            effective_depth,
+            effective_max_time_ms,
+            effective_multi_pv,
+            effective_max_pv_plies,
+            engine_id,
+        )
+        cached = self._get_from_cache(cache_key)
+        if cached is not None:
+            result = dict(cached)
+            result["stats"] = dict(result["stats"])
+            result["stats"]["cached"] = True
+            result["requestId"] = request_id
+            return result
+
+        start_time = time.perf_counter()
+        time_limit_s = max(0.1, effective_max_time_ms / 1000.0)
+
+        depth_history: dict[int, dict[int, dict[str, Any]]] = collections.defaultdict(dict)
+        last_info: dict[str, Any] = {}
+
+        with self._lock:
+            local_cancel = cancel_event or threading.Event()
+            self._current_cancel_event = local_cancel
+            self._current_request_id = request_id
+            try:
+                engine = self._ensure_engine()
+                with engine.analysis(
+                    board,
+                    chess.engine.Limit(depth=effective_depth, time=time_limit_s),
+                    multipv=effective_multi_pv,
+                ) as analysis:
+                    self._current_analysis = analysis
+                    for info in analysis:
+                        if local_cancel.is_set():
+                            analysis.stop()
+                            break
+                        d = info.get("depth")
+                        mpv = info.get("multipv")
+                        if d is not None and mpv is not None:
+                            depth_history[d][mpv] = _format_eval_item(info, effective_max_pv_plies)
+                            last_info = info
+            except chess.engine.EngineTerminatedError:
+                logger.error("Stockfish 引擎在评估中异常退出，尝试重建")
+                self._engine = None
+                raise RuntimeError("Stockfish engine terminated unexpectedly")
+            finally:
+                self._current_cancel_event = None
+                self._current_analysis = None
+                self._current_request_id = None
+
+        # 优先选择所有 MultiPV 候选均完成计算的最大深度
+        d_full = sorted([d for d, m in depth_history.items() if len(m) >= effective_multi_pv])
+        if d_full:
+            final_depth = d_full[-1]
+        else:
+            d_candidates = sorted([d for d, m in depth_history.items() if 1 in m])
+            if not d_candidates:
+                final_depth = last_info.get("depth", 1)
+                depth_history[final_depth][1] = _format_eval_item(last_info, effective_max_pv_plies)
+            else:
+                final_depth = d_candidates[-1]
+
+        candidates = [
+            depth_history[final_depth][rank]
+            for rank in sorted(depth_history[final_depth].keys())
+        ]
+
+        best_item = candidates[0] if candidates else None
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+
+        res = {
+            "requestId": request_id,
+            "completedDepth": final_depth,
+            "best": best_item,
+            "candidates": candidates,
+            "engine": {
+                "name": self._engine_identity,
+                "profile": profile or "standard",
+                "threads": self.threads,
+                "hashMb": self.hash_mb,
+            },
+            "stats": {
+                "elapsedMs": elapsed_ms,
+                "nodes": last_info.get("nodes"),
+                "nps": last_info.get("nps"),
+                "cached": False,
+            },
+        }
+
+        self._put_to_cache(cache_key, res)
+        return res
+
+    def close(self) -> None:
+        """关闭底层 UCI 引擎。"""
+        with self._lock:
+            if self._engine is not None:
+                try:
+                    self._engine.quit()
+                except Exception:
+                    pass
+                self._engine = None
+
+
+# 单例分析服务
+_analyzer_instance: StockfishAnalyzer | None = None
+_analyzer_init_lock = threading.Lock()
+
+
+def get_analyzer() -> StockfishAnalyzer:
+    global _analyzer_instance
+    if _analyzer_instance is None:
+        with _analyzer_init_lock:
+            if _analyzer_instance is None:
+                _analyzer_instance = StockfishAnalyzer()
+    return _analyzer_instance

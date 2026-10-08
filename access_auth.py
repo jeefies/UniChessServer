@@ -56,9 +56,20 @@ def is_direct_loopback(request: Request) -> bool:
 
 
 def require_access_token(request: Request) -> None:
-    """FastAPI 依赖：挂到每个 /api/* 路由上，不通过就抛 401。"""
+    """FastAPI 依赖：挂到每个 /api/* 与 /sf/v1/* 路由上，不通过就抛 401。
+
+    支持两种请求头形式：
+    1. Authorization: Bearer <token>（移动端/标准 OAuth 风格）
+    2. X-Access-Token: <token>（Web 前端/历史风格）
+    """
     expected = access_token()
-    supplied = request.headers.get(ACCESS_TOKEN_HEADER, "")
+    auth_header = request.headers.get("authorization", "").strip()
+    supplied = ""
+    if auth_header.lower().startswith("bearer "):
+        supplied = auth_header[7:].strip()
+    if not supplied:
+        supplied = request.headers.get(ACCESS_TOKEN_HEADER, "")
+
     if expected and supplied and hmac.compare_digest(supplied.encode(), expected.encode()):
         return
     if is_direct_loopback(request):
