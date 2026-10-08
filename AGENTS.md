@@ -7,12 +7,20 @@
 - Python：`/home/jeefy/miniconda3/envs/unichess/bin/python`（无 pytest，全部用标准库 `unittest`）
 - 无 `pyproject.toml` / `requirements.txt` / CI：直接 `python app.py` 运行
 - 启动：`python app.py --host 127.0.0.1 --port 8000`（仅接受 `--host/--port`）
-- 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；167 项，
-  其中访问门禁 26 项 / M3 19 项 / M2 24 项 / DS 15 项 / jobs 33 项 / server 28 项 /
+- 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；169 项，
+  其中访问门禁 27 项 / M3 19 项 / M2 24 项 / DS 15 项 / jobs 34 项 / server 28 项 /
   SF 22 项）。
   Windows 本机有 4 项必失败：3 项符号链接权限 + 1 项 `../M2` 包不在本机
-  （`describe_model('M2')` 报 error），都与门禁无关，干净树上同样失败；远端 167 项全绿
-  （SF 前提：装好二进制，见「SF 接线」）
+  （`describe_model('M2')` 报 error），都与门禁无关，干净树上同样失败；
+  远端 169 项全绿（SF 前提：装好二进制，见「SF 接线」）
+- **批量对弈汇总里的 `inf` 不能进 HTTP 响应**：`Kit.stats` 的 Elo 哨兵是 `ELO_INF`
+  （`float('inf')`），一方全胜/还没下完时汇总里必然出现（`elo` / `elo_ci95` /
+  `elo_pentanomial*`），job 的 status.json 原样带出来。starlette 的 JSONResponse
+  用 `allow_nan=False`，一个 inf 让整条 `/api/arena/batch/state` 变 500
+  （自研引擎实力接近时极少全胜，SF 这种 baseline 次次踩中，2026-10-08 修）。
+  出口在 `jobs._json_finite()`（snapshot 与观战 step 两个出口都过它），
+  新增透出 job 状态的路由必须同样处理，回归测试见 `tests/test_jobs.py`
+  `test_snapshot_sanitizes_infinite_elo`。
 - 远端部署：systemd 用户级服务 `unichess-server.service` + `unichess-tunnel.service`
 - 接口清单与模型插件契约见 `README.md`（刷新区块务必同步两份）
 

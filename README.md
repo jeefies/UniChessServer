@@ -209,6 +209,10 @@ SF = **Stockfish 19**（2026-09-05 发布，GPLv3，官方仓库
   安装：在 Server 目录跑 `python tools/fetch_stockfish.py`（自动识别平台、下载、
   sha256 校验、解压安装到 `tools/stockfish[.exe]`；`--check` 只校验已安装版本）。
   也可 `UNICHESS_STOCKFISH_BIN=/path/to/stockfish` 指向系统里已有的一份。
+- 首批实测（2026-10-08，4 局/2 局小样本，仅示意"同一口径下怎么读"）：
+  `SF(fast)` 2:0 `M2(fast)`（均将杀）；`SF(weak)`（Skill 3 + 0.3s）0:4 `T(max_mcts)`
+  ——自研 T 已强过被大幅放水的 SF；`SF(default)`（1s 满力）4:0 `T(max_mcts)`
+  ——满力 SF 仍显著在 T 之上。合计 Elo 差距请跑几十轮再看（`elo_ci95` 才有意义）。
 - 二进制找不到时**模块 import 不受影响**：`/api/models` 照常列出 SF，只有
   `/api/new` 真正建会话时报错（detail 带安装提示），不会把模型清单带红。
 - 每个会话一个 UCI 子进程（stdin/stdout，经 python-chess 的 `SimpleEngine` 包装），
@@ -286,7 +290,7 @@ M3 的 `policy` 档就是这么加的（`models/M3.local.json`）。
 
 在 Server 目录下运行。
 
-- 远端 167 项全绿（含 SF 22 项；前提是先跑过 `tools/fetch_stockfish.py`）。
+- 远端 169 项全绿（含 SF 22 项；前提是先跑过 `tools/fetch_stockfish.py`）。
 - Windows 本机：4 项必失败（3 项符号链接权限 + 1 项 `../M2` 包不在本机，
   `describe_model('M2')` 报 error），都与门禁无关，干净树上同样失败；
   SF 的用例在装了 `tools/stockfish.exe` 的本机照常跑，没装二进制时整体 skip
