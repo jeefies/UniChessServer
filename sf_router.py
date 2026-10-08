@@ -108,7 +108,7 @@ class AnalyzeMoveRequest(BaseModel):
         None, description="搜索预算限制；若省略则继承 profile 或标准深度 128。"
     )
     multiPv: int | None = Field(
-        DEFAULT_MULTI_PV, ge=1, le=10, description="首阶段多候选线数（默认 2）。"
+        None, ge=1, le=10, description="首阶段多候选线数（若省略则继承 profile：lightning 默认为 1，其余默认为 2）。"
     )
     maxPvPlies: int | None = Field(
         DEFAULT_MAX_PV_PLIES, ge=1, le=64, description="返回 PV 的最大步数截断（默认 12）。"
@@ -120,7 +120,7 @@ class EvaluateRequest(BaseModel):
     position: PositionInput = Field(..., description="待评估局面。")
     profile: str | None = Field("standard", description="预设档位（lightning / fast / standard / deep / ultra）。")
     limits: MoveAnalysisLimits | None = Field(None, description="搜索限制。")
-    multiPv: int | None = Field(DEFAULT_MULTI_PV, ge=1, le=10, description="候选线数。")
+    multiPv: int | None = Field(None, ge=1, le=10, description="候选线数（若省略则继承 profile）。")
     maxPvPlies: int | None = Field(DEFAULT_MAX_PV_PLIES, ge=1, le=64, description="PV 步数。")
 
 
@@ -158,10 +158,17 @@ class ComparisonResult(BaseModel):
     )
 
 
+class OpeningInfo(BaseModel):
+    name: str = Field(..., description="开局名称或体系")
+    theory: bool = Field(..., description="是否属于理论定式着法")
+    ply: int = Field(..., description="理论定式匹配步数")
+
+
 class EngineStats(BaseModel):
     nodes: int | None = Field(None, description="搜索总节点数")
     nps: int | None = Field(None, description="每秒搜索节点数")
     hashfull: int | None = Field(None, description="置换表千分比占用")
+    tbhits: int | None = Field(None, description="Syzygy 残局库命中次数")
     elapsedMs: int | None = Field(None, description="总耗时（毫秒）")
     cached: bool = Field(False, description="是否命中服务端 LRU 计算缓存")
 
@@ -175,6 +182,7 @@ class AnalyzeMoveResponse(BaseModel):
         None, description="上一完成深度（depth-1）的最佳走法，用于评估评分稳定性"
     )
     comparison: ComparisonResult = Field(..., description="同深度对比结果")
+    opening: OpeningInfo | None = Field(None, description="开局理论名称与体系识别信息")
     engine: dict[str, Any] = Field(..., description="引擎版本与运行配置")
     stats: EngineStats = Field(..., description="耗时与搜索统计")
 
@@ -184,6 +192,7 @@ class EvaluateResponse(BaseModel):
     completedDepth: int = Field(..., description="实际完成深度")
     best: EvalItem | None = Field(None, description="最佳走法")
     candidates: list[EvalItem] = Field(default_factory=list, description="各候选走法评分排序列表")
+    opening: OpeningInfo | None = Field(None, description="开局理论名称与体系识别信息")
     engine: dict[str, Any] = Field(..., description="引擎版本与运行配置")
     stats: EngineStats = Field(..., description="耗时与搜索统计")
 

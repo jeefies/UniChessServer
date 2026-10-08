@@ -32,21 +32,153 @@ DEFAULT_HELPER_THREADS = int(os.environ.get("UNICHESS_SF_HELPER_THREADS", "4"))
 DEFAULT_HASH_MB = int(os.environ.get("UNICHESS_SF_HASH_MB", "1024"))
 DEFAULT_CACHE_SIZE = int(os.environ.get("UNICHESS_SF_CACHE_SIZE", "500"))
 
+
+def _find_default_syzygy_path() -> str:
+    env_path = os.environ.get("UNICHESS_SF_SYZYGY_PATH")
+    if env_path and os.path.isdir(env_path):
+        return env_path
+    candidates = [
+        "/home/jeefy/UniChess/data/raw/syzygy345",
+        "/home/jeefy/UniChess/ResNet/data/raw/syzygy345",
+        os.path.expanduser("~/UniChess/data/raw/syzygy345"),
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return ""
+
+
+DEFAULT_SYZYGY_PATH = _find_default_syzygy_path()
+
+
+def _find_openings_file() -> str | None:
+    candidates = [
+        os.path.join(os.path.dirname(__file__), "..", "Kit", "data", "openings.txt"),
+        os.path.join(os.path.dirname(__file__), "data", "openings.txt"),
+        "/home/jeefy/UniChess/Kit/data/openings.txt",
+        "C:\\Users\\jeefy\\Documents\\UniChess\\Kit\\data\\openings.txt",
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return os.path.abspath(c)
+    return None
+
+
+class OpeningClassifier:
+    """开局理论定式与体系识别（基于 Kit/data/openings.txt 与常用前缀）。"""
+
+    def __init__(self, openings_file: str | None = None) -> None:
+        self.trie: dict[str, Any] = {}
+        self._common_prefixes = {
+            ("e2e4",): "王兵开局",
+            ("d2d4",): "后兵开局",
+            ("c2c4",): "英国开局",
+            ("g1f3",): "列蒂开局",
+            ("f2f4",): "伯德开局",
+            ("e2e4", "e7e5"): "开放性布局 (Open Game)",
+            ("e2e4", "c7c5"): "西西里防御",
+            ("e2e4", "e7e6"): "法兰西防御",
+            ("e2e4", "c7c6"): "卡罗-卡恩防御",
+            ("e2e4", "d7d5"): "斯堪的纳维亚防御",
+            ("e2e4", "g8f6"): "阿廖欣防御",
+            ("e2e4", "d7d6"): "皮尔茨防御",
+            ("d2d4", "d7d5"): "封闭性布局 (Closed Game)",
+            ("d2d4", "g8f6"): "印度防御体系",
+            ("d2d4", "f7f5"): "荷兰防御",
+        }
+        self._load(openings_file)
+
+    def _load(self, openings_file: str | None) -> None:
+        for pref, name in self._common_prefixes.items():
+            curr = self.trie
+            for mv in pref:
+                curr = curr.setdefault("children", {}).setdefault(mv, {})
+            curr["name"] = name
+
+        file_path = openings_file or _find_openings_file()
+        if not file_path or not os.path.isfile(file_path):
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("#")
+                    moves = parts[0].strip().split()
+                    name = parts[1].strip() if len(parts) > 1 else ""
+                    if not moves:
+                        continue
+                    curr = self.trie
+                    for mv in moves:
+                        curr = curr.setdefault("children", {}).setdefault(mv, {})
+                    if name:
+                        curr["name"] = name
+        except Exception as exc:
+            logger.warning("开局库加载异常: %s", exc)
+
+    def classify(self, moves: list[str], played_move: str | None = None) -> dict[str, Any] | None:
+        """识别当前走法序列是否符合开局理论，返回开局名称与是否理论着法。"""
+        full_moves = list(moves)
+        if played_move:
+            full_moves.append(played_move.strip())
+
+        if not full_moves:
+            return None
+
+        curr = self.trie
+        last_name = None
+        matched_depth = 0
+
+        for mv in full_moves:
+            children = curr.get("children", {})
+            if mv not in children:
+                break
+            curr = children[mv]
+            matched_depth += 1
+            if "name" in curr:
+                last_name = curr["name"]
+
+        if matched_depth == 0:
+            return None
+
+        is_theory = (matched_depth == len(full_moves))
+
+        if is_theory and "name" not in curr:
+            stack = [curr]
+            while stack:
+                node = stack.pop()
+                if "name" in node:
+                    last_name = f"{node['name']}体系"
+                    break
+                stack.extend(node.get("children", {}).values())
+
+        if not last_name:
+            last_name = "常规开局"
+
+        return {
+            "name": last_name,
+            "theory": is_theory,
+            "ply": matched_depth,
+        }
+
+
 # 预设档位（profile）
 PROFILES: dict[str, dict[str, Any]] = {
     "lightning": {
         "depth": 22,
-        "maxTimeMs": 600,
-        "multiPv": 2,
+        "maxTimeMs": 500,
+        "multiPv": 1,
         "maxPvPlies": 10,
-        "description": "极速档：目标深度 22，硬时间上限 600ms，双路并发，适合毫秒级 AI 对话交互。",
+        "description": "极速档：目标深度 22，硬时间上限 500ms，单候选+实战并行推演，适合毫秒级 AI 对话交互。",
     },
     "fast": {
         "depth": 22,
         "maxTimeMs": 1000,
         "multiPv": 2,
         "maxPvPlies": 10,
-        "description": "快档：目标深度 22，硬时间上限 1000ms，兼顾战术深度与秒级交互。",
+        "description": "快档：目标深度 22，硬时间上限 1000ms，双候选，兼顾战术深度与秒级交互。",
     },
     "standard": {
         "depth": STANDARD_DEPTH,
@@ -156,11 +288,15 @@ class StockfishAnalyzer:
         helper_threads: int = DEFAULT_HELPER_THREADS,
         hash_mb: int = DEFAULT_HASH_MB,
         cache_size: int = DEFAULT_CACHE_SIZE,
+        syzygy_path: str | None = None,
+        openings_file: str | None = None,
     ) -> None:
         self.binary_path = _resolve_binary(binary)
         self.threads = threads
         self.helper_threads = helper_threads
         self.hash_mb = hash_mb
+        self.syzygy_path = DEFAULT_SYZYGY_PATH if syzygy_path is None else syzygy_path
+        self._opening_clf = OpeningClassifier(openings_file)
         self._lock = threading.Lock()
         self._engine: chess.engine.SimpleEngine | None = None
         self._helper_engine: chess.engine.SimpleEngine | None = None
@@ -191,11 +327,18 @@ class StockfishAnalyzer:
                 identity = f"{identity} (SF {STOCKFISH_VERSION})"
             self._engine_identity = identity
 
-            engine.configure({
+            cfg: dict[str, Any] = {
                 "Threads": self.threads,
                 "Hash": self.hash_mb,
                 "Move Overhead": 10,
-            })
+            }
+            if self.syzygy_path and os.path.isdir(self.syzygy_path):
+                cfg["SyzygyPath"] = self.syzygy_path
+                cfg["SyzygyProbeDepth"] = 1
+                cfg["Syzygy50MoveRule"] = True
+                logger.info("主引擎已成功挂载 Syzygy 残局库: %s", self.syzygy_path)
+
+            engine.configure(cfg)
             try:
                 engine.configure({"UCI_ShowWDL": True})
             except Exception as exc:
@@ -219,11 +362,16 @@ class StockfishAnalyzer:
             try:
                 logger.info("正在启动 Stockfish UCI 辅助分析子进程（并发加速）: %s", self.binary_path)
                 engine = chess.engine.SimpleEngine.popen_uci(self.binary_path)
-                engine.configure({
+                h_cfg: dict[str, Any] = {
                     "Threads": self.helper_threads,
                     "Hash": max(64, self.hash_mb // 2),
                     "Move Overhead": 10,
-                })
+                }
+                if self.syzygy_path and os.path.isdir(self.syzygy_path):
+                    h_cfg["SyzygyPath"] = self.syzygy_path
+                    h_cfg["SyzygyProbeDepth"] = 1
+                    h_cfg["Syzygy50MoveRule"] = True
+                engine.configure(h_cfg)
                 try:
                     engine.configure({"UCI_ShowWDL": True})
                 except Exception:
@@ -271,6 +419,7 @@ class StockfishAnalyzer:
                 status = "error"
                 logger.exception("Stockfish 就绪探测异常: %s", exc)
 
+            has_syzygy = bool(self.syzygy_path and os.path.isdir(self.syzygy_path))
             return {
                 "status": status,
                 "engine": {
@@ -282,6 +431,8 @@ class StockfishAnalyzer:
                     "hashMb": self.hash_mb,
                     "nnue": True,
                     "showWdl": True,
+                    "syzygy": has_syzygy,
+                    "syzygyPath": self.syzygy_path if has_syzygy else None,
                     "parallelTwoStage": True,
                 },
                 "defaults": {
@@ -424,6 +575,10 @@ class StockfishAnalyzer:
         res["stats"]["elapsedMs"] = elapsed_ms
         res["stats"]["cached"] = False
 
+        # 开局识别与理论定式标注
+        opening_info = self._opening_clf.classify(moves, played_move)
+        res["opening"] = opening_info
+
         # 写入缓存
         self._put_to_cache(cache_key, res)
         return res
@@ -452,6 +607,7 @@ class StockfishAnalyzer:
         last_info_step2: dict[str, Any] = {}
 
         t0 = time.perf_counter()
+        primary_done_event = threading.Event()
 
         def run_primary():
             try:
@@ -473,6 +629,8 @@ class StockfishAnalyzer:
                             last_info_step1.update(info)
             except Exception as exc:
                 logger.warning("主分析引擎搜索异常: %s", exc)
+            finally:
+                primary_done_event.set()
 
         helper_stop_event = threading.Event()
 
@@ -497,6 +655,19 @@ class StockfishAnalyzer:
                             )
                             last_info_step2.clear()
                             last_info_step2.update(info)
+
+                            # 大漏勺提前截断：若主引擎已搜索完成，且实战走法已达到足够战术深度（>= 12），
+                            # 且已暴跌为确定性大漏（<= -600 cp 或已被将杀），提前截断辅助推演
+                            if d >= 12 and primary_done_event.is_set():
+                                sc = info.get("score")
+                                if sc is not None:
+                                    rel = sc.relative
+                                    cp = rel.score()
+                                    mate = rel.mate()
+                                    if (mate is not None and mate < 0) or (cp is not None and cp <= -600):
+                                        logger.info("实战走法触发大漏勺提前截断 (depth %d, score %s)", d, sc)
+                                        analysis_played.stop()
+                                        break
             except Exception as exc:
                 logger.warning("辅助分析引擎搜索异常: %s", exc)
 
@@ -656,11 +827,13 @@ class StockfishAnalyzer:
         total_nodes = (last_info_step1.get("nodes") or 0) + (last_info_step2.get("nodes") or 0)
         nps = last_info_step1.get("nps") or last_info_step2.get("nps")
         hashfull = last_info_step1.get("hashfull") or last_info_step2.get("hashfull")
+        tbhits = (last_info_step1.get("tbhits") or 0) + (last_info_step2.get("tbhits") or 0)
 
         stats = {
             "nodes": total_nodes if total_nodes > 0 else (last_info_step1.get("nodes") or last_info_step2.get("nodes")),
             "nps": nps,
             "hashfull": hashfull,
+            "tbhits": tbhits if tbhits > 0 else (last_info_step1.get("tbhits") or last_info_step2.get("tbhits")),
         }
 
         return {
@@ -773,12 +946,14 @@ class StockfishAnalyzer:
 
         best_item = candidates[0] if candidates else None
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        opening_info = self._opening_clf.classify(moves)
 
         res = {
             "requestId": request_id,
             "completedDepth": final_depth,
             "best": best_item,
             "candidates": candidates,
+            "opening": opening_info,
             "engine": {
                 "name": self._engine_identity,
                 "profile": profile or "standard",
@@ -789,6 +964,7 @@ class StockfishAnalyzer:
                 "elapsedMs": elapsed_ms,
                 "nodes": last_info.get("nodes"),
                 "nps": last_info.get("nps"),
+                "tbhits": last_info.get("tbhits"),
                 "cached": False,
             },
         }

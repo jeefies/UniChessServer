@@ -94,6 +94,8 @@ class StockfishAnalysisEngineTestCase(unittest.TestCase):
         self.assertEqual(info["defaults"]["standardDepth"], 128)
         self.assertIn("deep", info["profiles"])
         self.assertIn("lightning", info["profiles"])
+        self.assertEqual(info["profiles"]["lightning"]["multiPv"], 1)
+        self.assertIn("syzygy", info["engine"])
         self.assertTrue(info["engine"]["parallelTwoStage"])
 
     def setUp(self):
@@ -223,6 +225,32 @@ class StockfishAnalysisEngineTestCase(unittest.TestCase):
         self.assertGreaterEqual(res["comparison"]["commonDepth"], 4)
         self.assertTrue(res["engine"]["parallelTwoStage"])
 
+    def test_opening_classification(self):
+        # 意大利定式走法：f1c4
+        res1 = self.analyzer.analyze_move(
+            initial_fen=None,
+            moves=["e2e4", "e7e5", "g1f3", "b8c6"],
+            played_move="f1c4",
+            profile="fast",
+            depth=6,
+            max_time_ms=500,
+        )
+        self.assertIsNotNone(res1.get("opening"))
+        self.assertTrue(res1["opening"]["theory"])
+        self.assertTrue(any(k in res1["opening"]["name"] for k in ("意大利", "双马防御")))
+
+        # 偏离定式走法：a2a3
+        res2 = self.analyzer.analyze_move(
+            initial_fen=None,
+            moves=["e2e4", "e7e5", "g1f3", "b8c6"],
+            played_move="a2a3",
+            profile="fast",
+            depth=6,
+            max_time_ms=500,
+        )
+        self.assertIsNotNone(res2.get("opening"))
+        self.assertFalse(res2["opening"]["theory"])
+
 
 class SfApiRoutesIntegrationTestCase(unittest.TestCase):
     """FastAPI 路由与鉴权集成测试。"""
@@ -330,6 +358,7 @@ class SfApiRoutesIntegrationTestCase(unittest.TestCase):
         self.assertIn("AnalyzeMoveResponse", schemas)
         self.assertIn("ComparisonResult", schemas)
         self.assertIn("ScoreDetail", schemas)
+        self.assertIn("OpeningInfo", schemas)
 
 
 if __name__ == "__main__":
