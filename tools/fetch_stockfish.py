@@ -198,8 +198,6 @@ def main() -> int:
             return 1
         print(f'sha256 校验通过：{got}')
         binary = _extract_binary(archive, tmpdir)
-        if binary.name != _dest_name():
-            binary = binary.rename(tmpdir / _dest_name())
         installed.unlink(missing_ok=True)
         shutil.copy2(binary, installed)
     if os.name != 'nt':
