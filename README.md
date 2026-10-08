@@ -11,6 +11,7 @@
 - `arena_storage.py` 对弈记录 / 批次 SQLite（`data/arena/arena_history.db`）
 - `models/__init__.py` 模型发现/加载/预设查表
 - `models/{model_name}/engine.py` + `config.json`
+- `tools/fetch_stockfish.py` 下载并校验 Stockfish 官方二进制到 `tools/`（二进制本身不入 git）
 - `static/` 前端页面（`index.html` 对局页）
 - `tests/test_server.py` 对局接口验收；`tests/test_jobs.py` 批量对弈 / 观战 / 存储 / 管理员鉴权
 
@@ -132,6 +133,7 @@ python app.py --host 127.0.0.1 --port 8000
 | `M3` | 符号链接 → `/home/jeefy/UniChess/M3`（上游冻结可玩包：`src/chess_ai` 30M finalist + `NeuralMCTS`，3,695,244 参数 / 14.8MB 权重） | available，预设 `default`, `preview`, `policy` |
 | `M2` | 真实目录 `models/M2/`（适配层）+ `/home/jeefy/UniChess/M2`（上游 chess_ai neural v2.0.0 原包：策略网 `ChessCNN` + 价值网 `ResidualValueModel` + negamax/PUCT 搜索） | available，预设 `default`, `fast`, `deep`, `policy` |
 | `DS` | 符号链接 → `/home/jeefy/UniChess/DS`（`DS` 仓库 = jeefies/UniChessLLM，百炼 OpenAI 兼容端点大模型引擎；`.env` 在 DS 仓库内、不入库） | available，预设 `default`, `fast` |
+| `SF` | 真实目录 `models/SF/`（仓内适配层）+ `tools/stockfish`（Stockfish 19 官方二进制，**不入 git**，见下） | available（装好二进制后），预设 `default`, `fast`, `strong`, `depth12`, `weak`, `elo_1500` |
 
 命名约定：模型名保持简短（`T` 而非 `transformer`，`R` 而非 `resnet`），避免冗长；接入新项目时用符号链接 + 简短名，例如 `ln -s /home/jeefy/UniChess/ResNet models/R`。旧有的占位桩目录（`models/transformer/`、`models/resnet/`）已被对应的符号链接取代并清理。
 
@@ -192,6 +194,43 @@ M3 对应的是**上游冻结产物**（上游模型名 M6 30M finalist，注册
   而不是走法，此时适配层显式报错（服务层 classify 本就把可申领和棋判终局）。
 - 已知边界：上游 README 自称"v4 原版稳定基线"，未跑完整对局与性能扫描，Elo 未知。
 
+### SF 引擎说明
+
+SF = **Stockfish 19**（2026-09-05 发布，GPLv3，官方仓库
+`official-stockfish/Stockfish`，NNUE + alpha-beta）。开源国际象棋引擎里没有
+比它更强的：它是 CCRL/TCEC/CCC 等榜单的常任第一，fishtest 社区持续回归验证。
+接入它是为了给 T/R/S/M2/M3/DS 一个**同一规则、同一裁决口径下的可复现 baseline**：
+人机对弈可以直接下，批量对弈 `/api/arena/batch/start` 选 `SF` 对任一自研引擎
+即可量 Elo 差距（预算固定时 `depth12` 档的复现性最好）。
+
+接线方式与 M2 同构：**适配层在仓库里，引擎本体是第三方二进制**。
+
+- 部署物：官方 release `sf_19` 的预编译二进制（约 100MB，GPLv3，**不入 git**）。
+  安装：在 Server 目录跑 `python tools/fetch_stockfish.py`（自动识别平台、下载、
+  sha256 校验、解压安装到 `tools/stockfish[.exe]`；`--check` 只校验已安装版本）。
+  也可 `UNICHESS_STOCKFISH_BIN=/path/to/stockfish` 指向系统里已有的一份。
+- 二进制找不到时**模块 import 不受影响**：`/api/models` 照常列出 SF，只有
+  `/api/new` 真正建会话时报错（detail 带安装提示），不会把模型清单带红。
+- 每个会话一个 UCI 子进程（stdin/stdout，经 python-chess 的 `SimpleEngine` 包装），
+  进程间零共享。`cleanup()` 先 `quit` 后兜底强杀：SF 常驻搜索线程必须回收，
+  否则批量对弈反复建会话会把机器啃干净。
+- **Threads/Hash 默认保守**（1 线程 / 16MB）：进程内最多 4 个对局会话，批量对弈
+  还有 4 个 worker 进程，每份都开满线程会跟同机的 GPU 训练抢核；要更强再加
+  `threads` / `hash_mb`（构造参数，预设档里已给 `strong` = 2 线程 64MB）。
+- 不声明 `KIT_FACTORY`：观战 / 批量对弈走 `Kit.serving:game_engine_player_factory`
+  包装路径（每 worker 进程一局，4 进程并行），SF 用 CPU 不占显存，GPU 租约照常申请。
+- 参数（白名单，未知 kwarg 抛 `TypeError`）：`binary` / `movetime_ms` / `depth` /
+  `nodes` / `skill_level`(0–20) / `uci_elo`(1320–3190) / `hash_mb` / `threads` /
+  `show_wdl` / `move_overhead_ms`。搜索预算三选一，优先级 `depth > nodes > movetime_ms`；
+  `skill_level` 与 `uci_elo` 互斥。
+- **eval 是真 WDL**：默认开 `UCI_ShowWDL`，`state()['eval']` 是引擎自报的
+  `{win, draw, loss, pov: 'white'}`（千分比归一化，白方视角）；关掉 `show_wdl`
+  或引擎不回报时 `eval` 为 `None`，原始分在 `score_cp` / `score_mate` / `pv` /
+  `nodes` / `depth` / `seldepth` / `nps` 里。人类走子后旧分数作废（不像 M2 有
+  廉价价值网可重算），置空等引擎应答再给分。
+- 已知边界：`uci_elo` 与 `skill_level` 的"弱化"是引擎自带的拟人化抽样，
+  不代表真实 Elo；`movetime_ms` 是硬墙，搜索尾段可能略微超预算。
+
 ### DS 引擎说明
 
 DS 是**仓库内实现**的大模型引擎，不依赖本地权重文件，靠 `.env` 读取阿里云百炼
@@ -229,7 +268,9 @@ M3 的 `policy` 档就是这么加的（`models/M3.local.json`）。
 
 ## 当前状态
 
-`T`、`R`、`S`、`M3`、`M2` 均已接入并可对局（API 报告 `available`），其中 M2、M3 各有一个 `policy`（仅策略网）档。
+`T`、`R`、`S`、`M3`、`M2`、`DS` 均已接入并可对局（API 报告 `available`），其中 M2、M3 各有一个 `policy`（仅策略网）档。
+`SF`（Stockfish 19 baseline）也已接入，见「SF 引擎说明」：二进制需先跑
+`tools/fetch_stockfish.py` 安装，装好后 API 报告 `available`。
 
 ## 已归档内容（2026-09-20 审查后移除，勿再 Serve）
 
@@ -244,3 +285,9 @@ M3 的 `policy` 档就是这么加的（`models/M3.local.json`）。
 ```
 
 在 Server 目录下运行。
+
+- 远端 167 项全绿（含 SF 22 项；前提是先跑过 `tools/fetch_stockfish.py`）。
+- Windows 本机：4 项必失败（3 项符号链接权限 + 1 项 `../M2` 包不在本机，
+  `describe_model('M2')` 报 error），都与门禁无关，干净树上同样失败；
+  SF 的用例在装了 `tools/stockfish.exe` 的本机照常跑，没装二进制时整体 skip
+  （与 DS 的 skip 口径一致），不会新增必失败项。

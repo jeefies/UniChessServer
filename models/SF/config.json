@@ -1,0 +1,44 @@
+{
+  "default": {
+    "movetime_ms": 1000,
+    "skill_level": 20,
+    "threads": 1,
+    "hash_mb": 16,
+    "description": "标准 baseline：满力、每步至多 1 秒、单线程 16MB 哈希（与同机 GPU 训练共存）。"
+  },
+  "fast": {
+    "movetime_ms": 200,
+    "skill_level": 20,
+    "threads": 1,
+    "hash_mb": 16,
+    "description": "快档：每步至多 0.2 秒，观战/高并发时用得起的满力 baseline。"
+  },
+  "strong": {
+    "movetime_ms": 5000,
+    "skill_level": 20,
+    "threads": 2,
+    "hash_mb": 64,
+    "description": "最强档：每步至多 5 秒、2 线程 64MB 哈希。给足预算的 SF 会稳定赢下全部自研引擎，适合量实力上限。"
+  },
+  "depth12": {
+    "depth": 12,
+    "skill_level": 20,
+    "threads": 2,
+    "hash_mb": 32,
+    "description": "固定深度 12 档：结果与机器速度无关，批量对弈复现性最好。"
+  },
+  "weak": {
+    "movetime_ms": 300,
+    "skill_level": 3,
+    "threads": 1,
+    "hash_mb": 16,
+    "description": "弱化档：Skill Level 3 + 0.3 秒，模拟中等水平人类棋手，用来做难度下限参照。"
+  },
+  "elo_1500": {
+    "uci_elo": 1500,
+    "movetime_ms": 1000,
+    "threads": 1,
+    "hash_mb": 16,
+    "description": "UCI_Elo 1500 自限强度（引擎按 Elo 自选力度与预算），与 Level-3 档互为参照。"
+  }
+}

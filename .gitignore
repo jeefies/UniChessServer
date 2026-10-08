@@ -6,6 +6,11 @@
 *.zst
 *.zip
 
+# Stockfish 二进制（GPL，单文件约 100MB）：tools/fetch_stockfish.py 安装，脚本本身入库
+tools/*
+!tools/*.py
+!tools/*.md
+
 # 运行时产物
 logs/
 __pycache__/

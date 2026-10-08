@@ -7,10 +7,12 @@
 - Python：`/home/jeefy/miniconda3/envs/unichess/bin/python`（无 pytest，全部用标准库 `unittest`）
 - 无 `pyproject.toml` / `requirements.txt` / CI：直接 `python app.py` 运行
 - 启动：`python app.py --host 127.0.0.1 --port 8000`（仅接受 `--host/--port`）
-- 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；145 项，
-  其中访问门禁 26 项 / M3 19 项 / M2 24 项 / DS 15 项 / jobs 33 项 / server 28 项）。
+- 测试：`python -m unittest discover -s tests`（在 Server 目录下跑；167 项，
+  其中访问门禁 26 项 / M3 19 项 / M2 24 项 / DS 15 项 / jobs 33 项 / server 28 项 /
+  SF 22 项）。
   Windows 本机有 4 项必失败：3 项符号链接权限 + 1 项 `../M2` 包不在本机
-  （`describe_model('M2')` 报 error），都与门禁无关，干净树上同样失败；远端 145 项全绿
+  （`describe_model('M2')` 报 error），都与门禁无关，干净树上同样失败；远端 167 项全绿
+  （SF 前提：装好二进制，见「SF 接线」）
 - 远端部署：systemd 用户级服务 `unichess-server.service` + `unichess-tunnel.service`
 - 接口清单与模型插件契约见 `README.md`（刷新区块务必同步两份）
 
@@ -60,6 +62,24 @@
 - **软链进来的冻结包不要改它的 `config.json`**（被包内 SHA256SUMS 罩着）：
   加/改预设写 `models/<模型名>.local.json`，`_load_config` 会把两处按预设名合并，
   `list_presets`/`resolve_kwargs`/`describe_model` 都会看到合并结果。
+- **SF = Stockfish 19（开源最强引擎，baseline）**：适配层在 `models/SF/`（仓内），
+  引擎本体是官方 release `sf_19` 预编译二进制（约 100MB、GPLv3、**不入 git**），
+  装在 `Server/tools/stockfish[.exe]`。安装：`python tools/fetch_stockfish.py`
+  （按平台下载 + sha256 校验 + 解压；`--check` 校验已装版本）。定位顺序：
+  `UNICHESS_STOCKFISH_BIN` → `tools/stockfish[.exe]` → PATH。二进制缺失只让
+  `/api/new` 报错（detail 带提示），`/api/models` 与 import 不受影响——适配层的
+  二进制解析必须在 `__init__` 里做，模块级不能碰。
+- SF 每个会话一个 UCI 子进程（python-chess `SimpleEngine`），进程间零共享。
+  Threads 默认 1、Hash 默认 16MB：进程内最多 4 会话 + 批量 4 worker，
+  不能跟同机 GPU 训练抢核（要更强用 `strong` 档或加 `threads`/`hash_mb`）。
+  `cleanup()` 先 `quit` 后兜底 `close()` 强杀，SF 常驻搜索线程必须回收。
+- SF 不声明 `KIT_FACTORY`（观战/批量走 `Kit.serving:game_engine_player_factory`，
+  每 worker 一局，CPU 引擎不占显存）。默认开 `UCI_ShowWDL`，`state()['eval']`
+  是引擎自报的白方视角 WDL；关掉后 `eval=None`、原始分在 `score_cp`/`score_mate`/
+  `pv`/`nodes`/`depth`。构造参数白名单见 `models/SF/engine.py` 的 `_allowed_keys`，
+  搜索预算 `depth > nodes > movetime_ms`，`skill_level` 与 `uci_elo` 互斥。
+- SF 用例（`tests/test_sf_engine.py`）在二进制缺失时整体 skip，与 DS 同口径；
+  装上后远端 22 项应全绿。
 - M3 的 `engine.py` 只认 `simulations`/`eval_batch_size`/`reuse_tree`/`c_puct`/`device`
   五个参数（无 `ckpt`，权重路径包内硬编码），`state()` 的 `eval` 是白方视角 WDL 字典
 - M3 的 `state()` 用 `en_passant="fen"`（双步进兵后总写给区格），服务层 `state()` 用
