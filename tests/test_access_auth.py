@@ -182,7 +182,15 @@ class RouteTableTestCase(unittest.TestCase):
 
     @staticmethod
     def _routes():
-        return [r for r in app.app.routes if isinstance(r, APIRoute)]
+        routes = []
+        for r in app.app.routes:
+            if isinstance(r, APIRoute):
+                routes.append(r)
+            elif hasattr(r, "original_router") and hasattr(r.original_router, "routes"):
+                routes.extend([sub for sub in r.original_router.routes if isinstance(sub, APIRoute)])
+            elif hasattr(r, "routes"):
+                routes.extend([sub for sub in r.routes if isinstance(sub, APIRoute)])
+        return routes
 
     @staticmethod
     def _gated(route):
