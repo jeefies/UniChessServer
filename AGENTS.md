@@ -78,7 +78,7 @@
   `/api/new` 报错（detail 带提示），`/api/models` 与 import 不受影响——适配层的
   二进制解析必须在 `__init__` 里做，模块级不能碰。
 - **远端部署三连**（新机器/换机同样适用；`git pull` 后二进制不会跟着来）：
-  `git pull origin rebuild` → `python tools/fetch_stockfish.py`（下完记得
+  `git pull origin main` → `python tools/fetch_stockfish.py`（下完记得
   `--check`）→ `systemctl --user restart unichess-server`，然后
   `curl -s localhost:8000/api/models` 确认 SF 是 `available`（本机直连免口令）。
 - SF 每个会话一个 UCI 子进程（python-chess `SimpleEngine`），进程间零共享。
