@@ -27,8 +27,8 @@ STANDARD_DEPTH = 128
 DEFAULT_MAX_TIME_MS = 4000
 DEFAULT_MULTI_PV = 2
 DEFAULT_MAX_PV_PLIES = 12
-DEFAULT_THREADS = int(os.environ.get("UNICHESS_SF_THREADS", "8"))
-DEFAULT_HELPER_THREADS = int(os.environ.get("UNICHESS_SF_HELPER_THREADS", "4"))
+DEFAULT_THREADS = int(os.environ.get("UNICHESS_SF_THREADS", "6"))
+DEFAULT_HELPER_THREADS = int(os.environ.get("UNICHESS_SF_HELPER_THREADS", "6"))
 DEFAULT_HASH_MB = int(os.environ.get("UNICHESS_SF_HASH_MB", "1024"))
 DEFAULT_CACHE_SIZE = int(os.environ.get("UNICHESS_SF_CACHE_SIZE", "500"))
 
@@ -619,6 +619,8 @@ class StockfishAnalyzer:
 
         t0 = time.perf_counter()
         primary_done_event = threading.Event()
+        start_helper_event = threading.Event()
+        helper_stop_event = threading.Event()
 
         def run_primary():
             try:
@@ -635,16 +637,38 @@ class StockfishAnalyzer:
                         d = info.get("depth")
                         mpv = info.get("multipv") or 1
                         if d is not None:
-                            step1_history[d][mpv] = _format_eval_item(info, max_pv_plies)
                             last_info_step1.clear()
                             last_info_step1.update(info)
-                            # 严格达成目标深度（全部 MultiPV 候选均跑完目标深度）后即刻退出主搜索
-                            if depth < STANDARD_DEPTH and d >= depth and len(step1_history[d]) >= multi_pv:
+                            if "score" in info or "pv" in info:
+                                eval_item = _format_eval_item(info, max_pv_plies)
+                                if eval_item.get("move") or mpv not in step1_history[d]:
+                                    step1_history[d][mpv] = eval_item
+                                else:
+                                    if eval_item.get("score"):
+                                        step1_history[d][mpv]["score"] = eval_item["score"]
+                                    if eval_item.get("wdl"):
+                                        step1_history[d][mpv]["wdl"] = eval_item["wdl"]
+
+                            # 智能延迟启动：当探索至 depth >= 6 时，检查实战走法是否已在当前候选内；
+                            # 若实战走法已偏离当前最佳候选，立即唤醒辅助引擎并发定向推演
+                            if d >= 6 and not start_helper_event.is_set():
+                                current_candidates = {
+                                    item.get("move") for item in step1_history[d].values() if item.get("move")
+                                }
+                                if current_candidates and played_uci not in current_candidates:
+                                    start_helper_event.set()
+
+                            # 严格达成目标深度（全部 MultiPV 候选均跑完目标深度且具有有效走法）后即刻退出主搜索
+                            has_valid_moves = (
+                                len(step1_history[d]) >= multi_pv
+                                and all(item.get("move") for item in step1_history[d].values())
+                            )
+                            if depth < STANDARD_DEPTH and d >= depth and has_valid_moves:
                                 analysis.stop()
                                 break
-                            # 若已发现极浅死局（如 1 步杀），也即刻退出
+                            # 若已发现极浅死局（如 3 步以内必杀），也即刻退出
                             sc = info.get("score")
-                            if sc is not None and sc.relative.mate() is not None and abs(sc.relative.mate()) <= 1:
+                            if sc is not None and sc.relative.mate() is not None and abs(sc.relative.mate()) <= 3:
                                 analysis.stop()
                                 break
             except Exception as exc:
@@ -652,11 +676,19 @@ class StockfishAnalyzer:
             finally:
                 primary_done_event.set()
 
-        helper_stop_event = threading.Event()
-
         def run_helper():
             if helper_engine is None:
                 return
+
+            # 等待启动信号（由主引擎在发现 played_move 脱离候选时触发，或主引擎阶段一结束时触发）
+            while not cancel_event.is_set():
+                if start_helper_event.wait(timeout=0.01):
+                    break
+                if helper_stop_event.is_set():
+                    return
+            if cancel_event.is_set() or helper_stop_event.is_set():
+                return
+
             try:
                 with helper_engine.analysis(
                     board,
@@ -670,25 +702,33 @@ class StockfishAnalyzer:
                             break
                         d = info.get("depth")
                         if d is not None:
-                            step2_history[d] = _format_eval_item(
-                                info, max_pv_plies, override_move=played_uci
-                            )
                             last_info_step2.clear()
                             last_info_step2.update(info)
+                            if "score" in info or "pv" in info:
+                                eval_item = _format_eval_item(
+                                    info, max_pv_plies, override_move=played_uci
+                                )
+                                if eval_item.get("move") or d not in step2_history:
+                                    step2_history[d] = eval_item
+                                else:
+                                    if eval_item.get("score"):
+                                        step2_history[d]["score"] = eval_item["score"]
+                                    if eval_item.get("wdl"):
+                                        step2_history[d]["wdl"] = eval_item["wdl"]
 
                             # 辅助引擎同样严格搜索满目标深度才退出
-                            if depth < STANDARD_DEPTH and d >= depth:
+                            if depth < STANDARD_DEPTH and d >= depth and d in step2_history and step2_history[d].get("move"):
                                 analysis_played.stop()
                                 break
                             sc = info.get("score")
-                            if sc is not None and sc.relative.mate() is not None and abs(sc.relative.mate()) <= 1:
+                            if sc is not None and sc.relative.mate() is not None and abs(sc.relative.mate()) <= 3:
                                 analysis_played.stop()
                                 break
             except Exception as exc:
                 logger.warning("辅助分析引擎搜索异常: %s", exc)
 
         if helper_engine is not None and not cancel_event.is_set():
-            # 双路并发模式：主引擎搜 MultiPV 候选，辅助引擎并发定向推演实战走法
+            # 双路并发模式：主引擎搜 MultiPV 候选，辅助引擎按需并发定向推演实战走法
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 f_primary = executor.submit(run_primary)
                 f_helper = executor.submit(run_helper)
@@ -697,20 +737,34 @@ class StockfishAnalyzer:
                 f_primary.result()
 
                 # 快速判断 playedMove 是否已经在主引擎结果中
-                d_full = sorted([d for d, m in step1_history.items() if len(m) >= multi_pv])
-                d1 = d_full[-1] if d_full else max(step1_history.keys(), default=1)
+                d_full = sorted([
+                    d for d, m in step1_history.items()
+                    if len(m) >= multi_pv and all(item.get("move") for item in m.values())
+                ])
+                if d_full:
+                    d1 = d_full[-1]
+                else:
+                    d_candidates = sorted([
+                        d for d, m in step1_history.items()
+                        if 1 in m and m[1].get("move")
+                    ])
+                    d1 = d_candidates[-1] if d_candidates else max(step1_history.keys(), default=1)
                 played_in_candidates = any(
                     item.get("move") == played_uci for item in step1_history.get(d1, {}).values()
                 )
 
                 if played_in_candidates:
-                    # 实战走法已在 Top 候选，通知辅助引擎停止
+                    # 实战走法已在 Top 候选，通知辅助引擎停止并唤醒退出（无需真正计算）
                     helper_stop_event.set()
+                    start_helper_event.set()
                     if self._current_helper_analysis is not None:
                         try:
                             self._current_helper_analysis.stop()
                         except Exception:
                             pass
+                else:
+                    # 实战走法未在 Top 候选，确保辅助引擎已被唤醒以继续完成计算
+                    start_helper_event.set()
 
                 # 等待辅助引擎结束
                 f_helper.result()
@@ -718,8 +772,18 @@ class StockfishAnalyzer:
         else:
             # 串行降级模式（辅助引擎不可用或异常）
             run_primary()
-            d_full = sorted([d for d, m in step1_history.items() if len(m) >= multi_pv])
-            d1 = d_full[-1] if d_full else max(step1_history.keys(), default=1)
+            d_full = sorted([
+                d for d, m in step1_history.items()
+                if len(m) >= multi_pv and all(item.get("move") for item in m.values())
+            ])
+            if d_full:
+                d1 = d_full[-1]
+            else:
+                d_candidates = sorted([
+                    d for d, m in step1_history.items()
+                    if 1 in m and m[1].get("move")
+                ])
+                d1 = d_candidates[-1] if d_candidates else max(step1_history.keys(), default=1)
             played_in_candidates = any(
                 item.get("move") == played_uci for item in step1_history.get(d1, {}).values()
             )
@@ -756,12 +820,18 @@ class StockfishAnalyzer:
                 except Exception as exc:
                     logger.warning("串行阶段二异常: %s", exc)
 
-        # 找出阶段一已完成的最佳深度 D1（优先选 MultiPV 全部分支已跑完的深度）
-        d_full = sorted([d for d, m in step1_history.items() if len(m) >= multi_pv])
+        # 找出阶段一已完成的最佳深度 D1（优先选 MultiPV 全部分支已跑完且具有有效走法的深度）
+        d_full = sorted([
+            d for d, m in step1_history.items()
+            if len(m) >= multi_pv and all(item.get("move") for item in m.values())
+        ])
         if d_full:
             d1 = d_full[-1]
         else:
-            d_candidates = sorted([d for d, m in step1_history.items() if 1 in m])
+            d_candidates = sorted([
+                d for d, m in step1_history.items()
+                if 1 in m and m[1].get("move")
+            ])
             if not d_candidates:
                 d1 = last_info_step1.get("depth", 1)
                 step1_history[d1][1] = _format_eval_item(last_info_step1, max_pv_plies)
@@ -802,8 +872,10 @@ class StockfishAnalyzer:
             common_depth = min(d1, d2)
             # 对齐到 common_depth 深度下的数据
             target_step1 = step1_history.get(common_depth, step1_history[d1])
-            best_eval = target_step1.get(1, step1_history[d1][1])
-            second_eval = target_step1.get(2)
+            best_eval = target_step1.get(1) or step1_history[d1].get(1)
+            if not (best_eval and best_eval.get("move")):
+                best_eval = step1_history[d1].get(1)
+            second_eval = target_step1.get(2) or step1_history[d1].get(2)
             played_eval = step2_history.get(common_depth, step2_history[d2])
             can_compare = True
         else:
@@ -947,17 +1019,31 @@ class StockfishAnalyzer:
                         d = info.get("depth")
                         mpv = info.get("multipv") or 1
                         if d is not None:
-                            depth_history[d][mpv] = _format_eval_item(info, effective_max_pv_plies)
-                            last_info = info
+                            last_info.clear()
+                            last_info.update(info)
+                            if "score" in info or "pv" in info:
+                                eval_item = _format_eval_item(info, effective_max_pv_plies)
+                                if eval_item.get("move") or mpv not in depth_history[d]:
+                                    depth_history[d][mpv] = eval_item
+                                else:
+                                    if eval_item.get("score"):
+                                        depth_history[d][mpv]["score"] = eval_item["score"]
+                                    if eval_item.get("wdl"):
+                                        depth_history[d][mpv]["wdl"] = eval_item["wdl"]
+
+                            has_valid_moves = (
+                                len(depth_history[d]) >= effective_multi_pv
+                                and all(item.get("move") for item in depth_history[d].values())
+                            )
                             if (
                                 effective_depth < STANDARD_DEPTH
                                 and d >= effective_depth
-                                and len(depth_history[d]) >= effective_multi_pv
+                                and has_valid_moves
                             ):
                                 analysis.stop()
                                 break
                             sc = info.get("score")
-                            if sc is not None and sc.relative.mate() is not None and abs(sc.relative.mate()) <= 1:
+                            if sc is not None and sc.relative.mate() is not None and abs(sc.relative.mate()) <= 3:
                                 analysis.stop()
                                 break
             except chess.engine.EngineTerminatedError:
@@ -969,12 +1055,18 @@ class StockfishAnalyzer:
                 self._current_analysis = None
                 self._current_request_id = None
 
-        # 优先选择所有 MultiPV 候选均完成计算的最大深度
-        d_full = sorted([d for d, m in depth_history.items() if len(m) >= effective_multi_pv])
+        # 优先选择所有 MultiPV 候选均完成计算且包含有效走法的最大深度
+        d_full = sorted([
+            d for d, m in depth_history.items()
+            if len(m) >= effective_multi_pv and all(item.get("move") for item in m.values())
+        ])
         if d_full:
             final_depth = d_full[-1]
         else:
-            d_candidates = sorted([d for d, m in depth_history.items() if 1 in m])
+            d_candidates = sorted([
+                d for d, m in depth_history.items()
+                if 1 in m and m[1].get("move")
+            ])
             if not d_candidates:
                 final_depth = last_info.get("depth", 1)
                 depth_history[final_depth][1] = _format_eval_item(last_info, effective_max_pv_plies)
