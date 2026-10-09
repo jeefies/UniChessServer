@@ -253,6 +253,19 @@ def health() -> dict[str, Any]:
     return analyzer.get_health_info()
 
 
+@router.post("/release")
+@api_router.post("/release")
+def release_engines() -> dict[str, Any]:
+    """主动释放 Stockfish 引擎常驻内存（关闭子进程并归还约 1.5GB 内存）。"""
+    analyzer = get_analyzer()
+    freed = analyzer.release_idle_engines(force=True)
+    return {
+        "status": "ok",
+        "released": freed,
+        "message": "Stockfish 引擎与内存已成功释放" if freed else "当前无运行中的引擎需释放",
+    }
+
+
 @router.post("/analyze-move", response_model=AnalyzeMoveResponse)
 @api_router.post("/analyze-move", response_model=AnalyzeMoveResponse)
 async def analyze_move(req: AnalyzeMoveRequest, request: Request) -> dict[str, Any]:

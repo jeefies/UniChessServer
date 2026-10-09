@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 import unittest
@@ -99,7 +100,7 @@ class StockfishAnalysisEngineTestCase(unittest.TestCase):
         self.assertTrue(info["engine"]["parallelTwoStage"])
 
     def setUp(self):
-        self.analyzer._cache.clear()
+        self.analyzer.clear_cache()
 
     def test_analyze_move_candidate_hit(self):
         # 常见开局：1. e4 e5 2. Nf3 Nc6 3. Bc4 (f1c4 是主流候选之一)
@@ -402,12 +403,60 @@ class SfApiRoutesIntegrationTestCase(unittest.TestCase):
         self.assertIn("/sf/v1/analyze-move", data["paths"])
         self.assertIn("/sf/v1/evaluate", data["paths"])
         self.assertIn("/sf/v1/health", data["paths"])
+        self.assertIn("/sf/v1/release", data["paths"])
         schemas = data["components"]["schemas"]
         self.assertIn("AnalyzeMoveRequest", schemas)
         self.assertIn("AnalyzeMoveResponse", schemas)
         self.assertIn("ComparisonResult", schemas)
         self.assertIn("ScoreDetail", schemas)
         self.assertIn("OpeningInfo", schemas)
+
+    def test_disk_cache_roundtrip(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tf:
+            tmp_db = tf.name
+        try:
+            cache = sf_analyzer.DiskCache(tmp_db)
+            key = ("test_action", "startpos", ("e2e4",), "e7e5", 22)
+            self.assertIsNone(cache.get(key))
+            sample_val = {"best": {"move": "e7e5", "score": {"value": 0}}, "stats": {"nodes": 100}}
+            cache.put(key, sample_val, depth=22)
+            self.assertEqual(cache.count(), 1)
+            retrieved = cache.get(key)
+            self.assertIsNotNone(retrieved)
+            self.assertEqual(retrieved["best"]["move"], "e7e5")
+            self.assertEqual(retrieved["stats"]["nodes"], 100)
+        finally:
+            if os.path.isfile(tmp_db):
+                os.remove(tmp_db)
+
+    def test_release_engines_endpoint(self):
+        if not _HAS_TESTCLIENT:
+            raise unittest.SkipTest("starlette TestClient 不可用")
+        client = TestClient(app.app)
+        resp = client.post(
+            "/sf/v1/release",
+            headers={"Authorization": "Bearer sf-token-123", "x-forwarded-for": "1.2.3.4"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertIn("released", data)
+
+    def test_health_shows_memory_idle_status(self):
+        if not _HAS_TESTCLIENT:
+            raise unittest.SkipTest("starlette TestClient 不可用")
+        client = TestClient(app.app)
+        resp = client.get(
+            "/sf/v1/health",
+            headers={"Authorization": "Bearer sf-token-123", "x-forwarded-for": "1.2.3.4"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("memory", data)
+        self.assertIn("resident", data["memory"])
+        self.assertIn("idleTimeoutSeconds", data["memory"])
+        self.assertIn("diskCacheRecords", data["memory"])
 
 
 if __name__ == "__main__":
