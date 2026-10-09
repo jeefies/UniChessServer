@@ -168,17 +168,17 @@ class OpeningClassifier:
 PROFILES: dict[str, dict[str, Any]] = {
     "lightning": {
         "depth": 22,
-        "maxTimeMs": 500,
+        "maxTimeMs": 2000,
         "multiPv": 1,
         "maxPvPlies": 10,
-        "description": "极速档：目标深度 22，硬时间上限 500ms，单候选+实战并行推演，适合毫秒级 AI 对话交互。",
+        "description": "极速档：目标深度 22（严格搜满 22 层即停），单候选+实战并行推演，适合高战术精度对话交互。",
     },
     "fast": {
         "depth": 22,
-        "maxTimeMs": 1000,
+        "maxTimeMs": 3000,
         "multiPv": 2,
         "maxPvPlies": 10,
-        "description": "快档：目标深度 22，硬时间上限 1000ms，双候选，兼顾战术深度与秒级交互。",
+        "description": "快档：目标深度 22（严格搜满 22 层即停），双候选，兼顾战术深度与秒级交互。",
     },
     "standard": {
         "depth": STANDARD_DEPTH,
@@ -600,6 +600,13 @@ class StockfishAnalyzer:
 
         played_uci = played_move_obj.uci()
         total_time_s = max(0.1, max_time_ms / 1000.0)
+        # 若指定了确定性目标深度 (depth < STANDARD_DEPTH，如 22)，
+        # 深度是唯一的停止准则，不设置过短的硬性时间限制避免浅层截断，仅保留 20s 作为异常兜底
+        engine_time_limit = (
+            max(total_time_s, 20.0)
+            if depth < STANDARD_DEPTH
+            else total_time_s
+        )
 
         step1_history: dict[int, dict[int, dict[str, Any]]] = collections.defaultdict(dict)
         step2_history: dict[int, dict[str, Any]] = {}
@@ -613,7 +620,7 @@ class StockfishAnalyzer:
             try:
                 with engine.analysis(
                     board,
-                    chess.engine.Limit(depth=depth, time=total_time_s),
+                    chess.engine.Limit(depth=depth, time=engine_time_limit),
                     multipv=multi_pv,
                 ) as analysis:
                     self._current_analysis = analysis
@@ -622,13 +629,18 @@ class StockfishAnalyzer:
                             analysis.stop()
                             break
                         d = info.get("depth")
-                        mpv = info.get("multipv")
-                        if d is not None and mpv is not None:
+                        mpv = info.get("multipv") or 1
+                        if d is not None:
                             step1_history[d][mpv] = _format_eval_item(info, max_pv_plies)
                             last_info_step1.clear()
                             last_info_step1.update(info)
-                            # 达成目标深度后即刻退出主搜索（无需等待超时）
+                            # 严格达成目标深度（全部 MultiPV 候选均跑完目标深度）后即刻退出主搜索
                             if depth < STANDARD_DEPTH and d >= depth and len(step1_history[d]) >= multi_pv:
+                                analysis.stop()
+                                break
+                            # 若已发现极浅死局（如 1 步杀），也即刻退出
+                            sc = info.get("score")
+                            if sc is not None and sc.relative.mate() is not None and abs(sc.relative.mate()) <= 1:
                                 analysis.stop()
                                 break
             except Exception as exc:
@@ -644,7 +656,7 @@ class StockfishAnalyzer:
             try:
                 with helper_engine.analysis(
                     board,
-                    chess.engine.Limit(depth=depth, time=total_time_s),
+                    chess.engine.Limit(depth=depth, time=engine_time_limit),
                     root_moves=[played_move_obj],
                 ) as analysis_played:
                     self._current_helper_analysis = analysis_played
@@ -660,23 +672,14 @@ class StockfishAnalyzer:
                             last_info_step2.clear()
                             last_info_step2.update(info)
 
-                            # 达成目标深度后即刻退出辅助搜索
+                            # 辅助引擎同样严格搜索满目标深度才退出
                             if depth < STANDARD_DEPTH and d >= depth:
                                 analysis_played.stop()
                                 break
-
-                            # 大漏勺提前截断：若主引擎已搜索完成，且实战走法已达到足够战术深度（>= 12），
-                            # 且已暴跌为确定性大漏（<= -600 cp 或已被将杀），提前截断辅助推演
-                            if d >= 12 and primary_done_event.is_set():
-                                sc = info.get("score")
-                                if sc is not None:
-                                    rel = sc.relative
-                                    cp = rel.score()
-                                    mate = rel.mate()
-                                    if (mate is not None and mate < 0) or (cp is not None and cp <= -600):
-                                        logger.info("实战走法触发大漏勺提前截断 (depth %d, score %s)", d, sc)
-                                        analysis_played.stop()
-                                        break
+                            sc = info.get("score")
+                            if sc is not None and sc.relative.mate() is not None and abs(sc.relative.mate()) <= 1:
+                                analysis_played.stop()
+                                break
             except Exception as exc:
                 logger.warning("辅助分析引擎搜索异常: %s", exc)
 
@@ -905,6 +908,11 @@ class StockfishAnalyzer:
 
         start_time = time.perf_counter()
         time_limit_s = max(0.1, effective_max_time_ms / 1000.0)
+        engine_time_limit = (
+            max(time_limit_s, 20.0)
+            if effective_depth < STANDARD_DEPTH
+            else time_limit_s
+        )
 
         depth_history: dict[int, dict[int, dict[str, Any]]] = collections.defaultdict(dict)
         last_info: dict[str, Any] = {}
@@ -917,7 +925,7 @@ class StockfishAnalyzer:
                 engine = self._ensure_engine()
                 with engine.analysis(
                     board,
-                    chess.engine.Limit(depth=effective_depth, time=time_limit_s),
+                    chess.engine.Limit(depth=effective_depth, time=engine_time_limit),
                     multipv=effective_multi_pv,
                 ) as analysis:
                     self._current_analysis = analysis
@@ -926,8 +934,8 @@ class StockfishAnalyzer:
                             analysis.stop()
                             break
                         d = info.get("depth")
-                        mpv = info.get("multipv")
-                        if d is not None and mpv is not None:
+                        mpv = info.get("multipv") or 1
+                        if d is not None:
                             depth_history[d][mpv] = _format_eval_item(info, effective_max_pv_plies)
                             last_info = info
                             if (
@@ -935,6 +943,10 @@ class StockfishAnalyzer:
                                 and d >= effective_depth
                                 and len(depth_history[d]) >= effective_multi_pv
                             ):
+                                analysis.stop()
+                                break
+                            sc = info.get("score")
+                            if sc is not None and sc.relative.mate() is not None and abs(sc.relative.mate()) <= 1:
                                 analysis.stop()
                                 break
             except chess.engine.EngineTerminatedError:

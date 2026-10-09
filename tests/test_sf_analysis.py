@@ -222,7 +222,7 @@ class StockfishAnalysisEngineTestCase(unittest.TestCase):
         self.assertTrue(res["comparison"]["canCompare"])
         self.assertEqual(res["played"]["move"], "a2a3")
         self.assertLessEqual(res["stats"]["elapsedMs"], 3500)
-        self.assertGreaterEqual(res["comparison"]["commonDepth"], 4)
+        self.assertGreaterEqual(res["comparison"]["commonDepth"], 22)
         self.assertTrue(res["engine"]["parallelTwoStage"])
 
     def test_opening_classification(self):

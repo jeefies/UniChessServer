@@ -39,9 +39,22 @@ OPENAPI_DESCRIPTION = """## Stockfish 国际象棋无状态深度分析服务（
 3. **局面重构约束（Threefold Repetition）**：
    - 请求必须携带 `initialFen` 加上完整的历史 UCI 走法列表 `moves`，服务端从初始局面推演，以准确识别**三次重复局面**和五十步和棋规则。
 4. **同深度对拍（Fair Comparison）**：
-   - `/sf/v1/analyze-move` 会先对根局面搜索最佳候选；若实战走法 `playedMove` 未命中，在剩余时间预算内以 `searchmoves` 补搜；
+   - `/sf/v1/analyze-move` 会双路并行对根局面搜索最佳候选与实战走法 `playedMove`；
    - 最终比对保证在两者的**共同完成深度（commonDepth）**下对齐，绝不跨深度比较。
    - `diffCp = played.score.value - best.score.value`：通常为 <= 0，表示走这一步相较最佳着法的厘兵损失。
+
+### 分析档位（Profiles）：
+- **`lightning`（极速档，推荐 AI 对话场景使用）**：目标深度 22 层。**服务端严格保证搜索深度达到 22 层才停止返回**（或残局瞬解/杀棋），单候选 + 实战走法双路并行，耗时通常在 500ms ~ 1000ms。
+- **`fast`（快档）**：目标深度 22 层，搜满 22 层停止，双候选 MultiPV=2。
+- **`standard`（标准档）**：标准深度 128，时间预算 4.0 秒，双候选。
+- **`deep`（深度档）**：标准深度 128，时间预算 4.0 秒。
+- **`ultra`（超深档）**：标准深度 128，时间预算 10.0 秒。
+
+### 开局定式与残局库扩展能力：
+1. **开局定式识别（`opening`）**：
+   - 服务端内置完整 ECO 开局前缀树，自动返回当前局面所处的定式名称（如 `name: "西班牙开局 柏林防御"`）、定式标记（`theory: true/false`）及定式匹配半步序。
+2. **Syzygy 3-4-5 残局库（Tablebase）**：
+   - 服务端常驻挂载 Syzygy 3-4-5 残局表，3-5 子局面可瞬间命中查表，深度直接穿透至 72~128 层，并在 `stats.tbhits` 返回残局库探测命中次数。
 
 ### 辅助棋力评语分类标准（供 AI 解说棋步）：
 - `diffCp == 0` 或 `played == best`：🌟 最佳着法 (Best Move)

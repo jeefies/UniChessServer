@@ -1,0 +1,836 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Stockfish Chess Analysis Service API",
+    "description": "## Stockfish 国际象棋无状态深度分析服务（API 指南与约束）\n\n面向移动端与 AI Agent 的高性能国际象棋分析服务。所有接口均为纯无状态设计，服务端不存储对局记录或用户数据。\n\n### 核心物理量与度量口径（AI 调用必须遵循）：\n1. **统一行棋方视角（Root Perspective）**：\n   - 所有的分数值（score）与胜平负概率（wdl）均恒从**当前请求根局面的走子方（Side to Move）**视角给出：\n   - 正值（+）表示当前走子方优势，负值（-）表示劣势。\n2. **单位度量**：\n   - `cp`：厘兵（centipawns），100 cp = 1 个兵。\n   - `mate`：将杀步数，正数为我方将杀对手，负数为我方被对手将杀。\n   - `wdl`：胜平负千分比，win + draw + loss = 1000。\n3. **局面重构约束（Threefold Repetition）**：\n   - 请求必须携带 `initialFen` 加上完整的历史 UCI 走法列表 `moves`，服务端从初始局面推演，以准确识别**三次重复局面**和五十步和棋规则。\n4. **同深度对拍（Fair Comparison）**：\n   - `/sf/v1/analyze-move` 会双路并行对根局面搜索最佳候选与实战走法 `playedMove`；\n   - 最终比对保证在两者的**共同完成深度（commonDepth）**下对齐，绝不跨深度比较。\n   - `diffCp = played.score.value - best.score.value`：通常为 <= 0，表示走这一步相较最佳着法的厘兵损失。\n\n### 分析档位（Profiles）：\n- **`lightning`（极速档，推荐 AI 对话场景使用）**：目标深度 22 层。**服务端严格保证搜索深度达到 22 层才停止返回**（或残局瞬解/杀棋），单候选 + 实战走法双路并行，耗时通常在 500ms ~ 1000ms。\n- **`fast`（快档）**：目标深度 22 层，搜满 22 层停止，双候选 MultiPV=2。\n- **`standard`（标准档）**：标准深度 128，时间预算 4.0 秒，双候选。\n- **`deep`（深度档）**：标准深度 128，时间预算 4.0 秒。\n- **`ultra`（超深档）**：标准深度 128，时间预算 10.0 秒。\n\n### 开局定式与残局库扩展能力：\n1. **开局定式识别（`opening`）**：\n   - 服务端内置完整 ECO 开局前缀树，自动返回当前局面所处的定式名称（如 `name: \"西班牙开局 柏林防御\"`）、定式标记（`theory: true/false`）及定式匹配半步序。\n2. **Syzygy 3-4-5 残局库（Tablebase）**：\n   - 服务端常驻挂载 Syzygy 3-4-5 残局表，3-5 子局面可瞬间命中查表，深度直接穿透至 72~128 层，并在 `stats.tbhits` 返回残局库探测命中次数。\n\n### 辅助棋力评语分类标准（供 AI 解说棋步）：\n- `diffCp == 0` 或 `played == best`：🌟 最佳着法 (Best Move)\n- `-15 <= diffCp < 0`：✅ 优秀着法 (Excellent)\n- `-40 <= diffCp < -15`：👍 良好着法 (Good)\n- `-100 <= diffCp < -40`：⚠️ 轻微缓着 (Inaccuracy)\n- `-250 <= diffCp < -100`：❓ 疑问着 / 错误 (Mistake)\n- `diffCp < -250`：❌ 严重大漏 (Blunder)\n",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/sf/v1/health": {
+      "get": {
+        "tags": [
+          "Stockfish Analysis"
+        ],
+        "summary": "Health",
+        "description": "查询分析引擎就绪状态、配置参数与上限。",
+        "operationId": "health_sf_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Health Sf V1 Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sf/v1/analyze-move": {
+      "post": {
+        "tags": [
+          "Stockfish Analysis"
+        ],
+        "summary": "Analyze Move",
+        "description": "一次完成最佳走法、第二候选与实战走法的同深度对拍。",
+        "operationId": "analyze_move_sf_v1_analyze_move_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyzeMoveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyzeMoveResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sf/v1/evaluate": {
+      "post": {
+        "tags": [
+          "Stockfish Analysis"
+        ],
+        "summary": "Evaluate",
+        "description": "返回任意局面的综合评价与候选走法列表。",
+        "operationId": "evaluate_sf_v1_evaluate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvaluateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AnalyzeMoveRequest": {
+        "properties": {
+          "requestId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestid",
+            "description": "请求唯一标识，便于跟踪或取消。"
+          },
+          "position": {
+            "$ref": "#/components/schemas/PositionInput",
+            "description": "待分析着法落子前的局面历史。"
+          },
+          "playedMove": {
+            "type": "string",
+            "title": "Playedmove",
+            "description": "实战走出的单步 UCI 着法（如 f1c4）。"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile",
+            "description": "预设档位（lightning / fast / standard / deep / ultra）。",
+            "default": "deep"
+          },
+          "limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MoveAnalysisLimits"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "搜索预算限制；若省略则继承 profile 或标准深度 128。"
+          },
+          "multiPv": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 10.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Multipv",
+            "description": "首阶段多候选线数（若省略则继承 profile：lightning 默认为 1，其余默认为 2）。"
+          },
+          "maxPvPlies": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 64.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maxpvplies",
+            "description": "返回 PV 的最大步数截断（默认 12）。",
+            "default": 12
+          }
+        },
+        "type": "object",
+        "required": [
+          "position",
+          "playedMove"
+        ],
+        "title": "AnalyzeMoveRequest"
+      },
+      "AnalyzeMoveResponse": {
+        "properties": {
+          "requestId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestid",
+            "description": "请求标识"
+          },
+          "best": {
+            "$ref": "#/components/schemas/EvalItem",
+            "description": "引擎分析得出的最佳走法"
+          },
+          "played": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvalItem"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "实战走出的走法评估"
+          },
+          "second": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvalItem"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "第二候选走法，用于评估最佳走法是否明显突出"
+          },
+          "previousBest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvalItem"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "上一完成深度（depth-1）的最佳走法，用于评估评分稳定性"
+          },
+          "comparison": {
+            "$ref": "#/components/schemas/ComparisonResult",
+            "description": "同深度对比结果"
+          },
+          "opening": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OpeningInfo"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "开局理论名称与体系识别信息"
+          },
+          "engine": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Engine",
+            "description": "引擎版本与运行配置"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/EngineStats",
+            "description": "耗时与搜索统计"
+          }
+        },
+        "type": "object",
+        "required": [
+          "best",
+          "comparison",
+          "engine",
+          "stats"
+        ],
+        "title": "AnalyzeMoveResponse"
+      },
+      "ComparisonResult": {
+        "properties": {
+          "canCompare": {
+            "type": "boolean",
+            "title": "Cancompare",
+            "description": "是否能在同深度下进行有效对比"
+          },
+          "commonDepth": {
+            "type": "integer",
+            "title": "Commondepth",
+            "description": "共同完成深度（同深度比对基准）"
+          },
+          "diffCp": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diffcp",
+            "description": "厘兵亏损值：played.score - best.score。负值表示相较最佳着法的损失（厘兵，100 cp = 1 兵）。"
+          },
+          "diffWdlLoss": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diffwdlloss",
+            "description": "失败率增加值：played.loss - best.loss（千分比）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "canCompare",
+          "commonDepth"
+        ],
+        "title": "ComparisonResult"
+      },
+      "EngineStats": {
+        "properties": {
+          "nodes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nodes",
+            "description": "搜索总节点数"
+          },
+          "nps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nps",
+            "description": "每秒搜索节点数"
+          },
+          "hashfull": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hashfull",
+            "description": "置换表千分比占用"
+          },
+          "tbhits": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tbhits",
+            "description": "Syzygy 残局库命中次数"
+          },
+          "elapsedMs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elapsedms",
+            "description": "总耗时（毫秒）"
+          },
+          "cached": {
+            "type": "boolean",
+            "title": "Cached",
+            "description": "是否命中服务端 LRU 计算缓存",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "EngineStats"
+      },
+      "EvalItem": {
+        "properties": {
+          "move": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Move",
+            "description": "UCI 格式着法，如 f1c4"
+          },
+          "depth": {
+            "type": "integer",
+            "title": "Depth",
+            "description": "实际完成的计算深度"
+          },
+          "seldepth": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seldepth",
+            "description": "最大选择性搜索深度"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoreDetail"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "行棋方视角的局面评分"
+          },
+          "wdl": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WdlDetail"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "胜平负千分比（总和 1000）"
+          },
+          "pv": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Pv",
+            "description": "后续主变例走法列表（UCI 格式）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "depth"
+        ],
+        "title": "EvalItem"
+      },
+      "EvaluateRequest": {
+        "properties": {
+          "requestId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestid",
+            "description": "请求唯一标识。"
+          },
+          "position": {
+            "$ref": "#/components/schemas/PositionInput",
+            "description": "待评估局面。"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile",
+            "description": "预设档位（lightning / fast / standard / deep / ultra）。",
+            "default": "standard"
+          },
+          "limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MoveAnalysisLimits"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "搜索限制。"
+          },
+          "multiPv": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 10.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Multipv",
+            "description": "候选线数（若省略则继承 profile）。"
+          },
+          "maxPvPlies": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 64.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maxpvplies",
+            "description": "PV 步数。",
+            "default": 12
+          }
+        },
+        "type": "object",
+        "required": [
+          "position"
+        ],
+        "title": "EvaluateRequest"
+      },
+      "EvaluateResponse": {
+        "properties": {
+          "requestId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestid",
+            "description": "请求标识"
+          },
+          "completedDepth": {
+            "type": "integer",
+            "title": "Completeddepth",
+            "description": "实际完成深度"
+          },
+          "best": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvalItem"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "最佳走法"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/EvalItem"
+            },
+            "type": "array",
+            "title": "Candidates",
+            "description": "各候选走法评分排序列表"
+          },
+          "opening": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OpeningInfo"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "开局理论名称与体系识别信息"
+          },
+          "engine": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Engine",
+            "description": "引擎版本与运行配置"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/EngineStats",
+            "description": "耗时与搜索统计"
+          }
+        },
+        "type": "object",
+        "required": [
+          "completedDepth",
+          "engine",
+          "stats"
+        ],
+        "title": "EvaluateResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "MoveAnalysisLimits": {
+        "properties": {
+          "depth": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Depth",
+            "description": "搜索深度上限，标准深度固定为 128。",
+            "default": 128
+          },
+          "maxTimeMs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maxtimems",
+            "description": "总时间预算（毫秒），覆盖全部搜索步骤。",
+            "default": 4000
+          }
+        },
+        "type": "object",
+        "title": "MoveAnalysisLimits"
+      },
+      "OpeningInfo": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "开局名称或体系"
+          },
+          "theory": {
+            "type": "boolean",
+            "title": "Theory",
+            "description": "是否属于理论定式着法"
+          },
+          "ply": {
+            "type": "integer",
+            "title": "Ply",
+            "description": "理论定式匹配步数"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "theory",
+          "ply"
+        ],
+        "title": "OpeningInfo"
+      },
+      "PositionInput": {
+        "properties": {
+          "initialFen": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Initialfen",
+            "description": "起始 FEN，缺省为国际象棋标准起始局面。"
+          },
+          "moves": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Moves",
+            "description": "从 initialFen 到当前分析局面之前的全部 UCI 历史走法列表（如 ['e2e4', 'e7e5']）。"
+          }
+        },
+        "type": "object",
+        "title": "PositionInput"
+      },
+      "ScoreDetail": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "description": "评分类型：'cp'（厘兵 centipawns）或 'mate'（将杀步数）"
+          },
+          "value": {
+            "type": "integer",
+            "title": "Value",
+            "description": "评分数值。统一为请求根局面当前行棋方视角：正值有利，负值不利。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "value"
+        ],
+        "title": "ScoreDetail"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "WdlDetail": {
+        "properties": {
+          "win": {
+            "type": "integer",
+            "title": "Win",
+            "description": "根局面当前行棋方获胜概率千分比"
+          },
+          "draw": {
+            "type": "integer",
+            "title": "Draw",
+            "description": "和棋概率千分比"
+          },
+          "loss": {
+            "type": "integer",
+            "title": "Loss",
+            "description": "根局面当前行棋方失败概率千分比"
+          }
+        },
+        "type": "object",
+        "required": [
+          "win",
+          "draw",
+          "loss"
+        ],
+        "title": "WdlDetail"
+      }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "通过 Authorization: Bearer <token> 鉴权"
+      },
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Access-Token",
+        "description": "通过 X-Access-Token: <token> 鉴权"
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "https://chess.jeefy.top",
+      "description": "UniChess 线上生产服务器"
+    },
+    {
+      "url": "http://127.0.0.1:8000",
+      "description": "本地开发 / 直连服务"
+    }
+  ],
+  "security": [
+    {
+      "BearerAuth": []
+    },
+    {
+      "ApiKeyAuth": []
+    }
+  ]
+}
