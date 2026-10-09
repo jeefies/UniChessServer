@@ -168,38 +168,38 @@ class OpeningClassifier:
 PROFILES: dict[str, dict[str, Any]] = {
     "lightning": {
         "depth": 22,
-        "maxTimeMs": 2000,
+        "maxTimeMs": None,
         "multiPv": 1,
         "maxPvPlies": 10,
-        "description": "极速档：目标深度 22（严格搜满 22 层即停），单候选+实战并行推演，适合高战术精度对话交互。",
+        "description": "极速档：目标深度 22（严格搜满 22 层即停，不限时间预算），单候选+实战并行推演，适合快速交互。",
     },
     "fast": {
         "depth": 22,
-        "maxTimeMs": 3000,
+        "maxTimeMs": None,
         "multiPv": 2,
         "maxPvPlies": 10,
-        "description": "快档：目标深度 22（严格搜满 22 层即停），双候选，兼顾战术深度与秒级交互。",
+        "description": "快档：目标深度 22（严格搜满 22 层即停，不限时间预算），双候选+实战并行推演。",
     },
     "standard": {
         "depth": STANDARD_DEPTH,
         "maxTimeMs": 4000,
         "multiPv": 2,
         "maxPvPlies": 12,
-        "description": "标准档：4.0 秒预算，标准深度 128，兼顾深度与响应速度。",
+        "description": "标准档：时间预算 4.0 秒，深度上限 128，兼顾深度与响应速度。",
     },
     "deep": {
         "depth": STANDARD_DEPTH,
         "maxTimeMs": 4000,
         "multiPv": 2,
         "maxPvPlies": 12,
-        "description": "深度档：同标准档，深度上限 128、4 秒总时间预算。",
+        "description": "深度档：基于时间预算（4.0 秒），不限制层数（深度上限 128），进行充分深入推演。",
     },
     "ultra": {
         "depth": STANDARD_DEPTH,
         "maxTimeMs": 10000,
         "multiPv": 2,
         "maxPvPlies": 16,
-        "description": "超深档：10 秒高预算，用于关键着法深度推演。",
+        "description": "超深档：基于时间预算（10.0 秒），不限制层数（深度上限 128），用于关键着法极限推演。",
     },
 }
 
@@ -500,8 +500,8 @@ class StockfishAnalyzer:
 
         # 2. 参数解析（继承 profile 与默认值）
         prof_cfg = PROFILES.get(profile or "standard", PROFILES["standard"])
-        effective_depth = STANDARD_DEPTH if depth is None else int(depth)
-        effective_max_time_ms = prof_cfg["maxTimeMs"] if max_time_ms is None else int(max_time_ms)
+        effective_depth = prof_cfg.get("depth", STANDARD_DEPTH) if depth is None else int(depth)
+        effective_max_time_ms = prof_cfg.get("maxTimeMs") if max_time_ms is None else int(max_time_ms)
         effective_multi_pv = prof_cfg["multiPv"] if multi_pv is None else max(1, int(multi_pv))
         effective_max_pv_plies = (
             prof_cfg.get("maxPvPlies", DEFAULT_MAX_PV_PLIES)
@@ -599,14 +599,18 @@ class StockfishAnalyzer:
         import concurrent.futures
 
         played_uci = played_move_obj.uci()
-        total_time_s = max(0.1, max_time_ms / 1000.0)
-        # 若指定了确定性目标深度 (depth < STANDARD_DEPTH，如 22)，
-        # 深度是唯一的停止准则，不设置过短的硬性时间限制避免浅层截断，仅保留 20s 作为异常兜底
-        engine_time_limit = (
-            max(total_time_s, 20.0)
-            if depth < STANDARD_DEPTH
-            else total_time_s
+        total_time_s = (
+            max(0.1, max_time_ms / 1000.0)
+            if max_time_ms is not None
+            else None
         )
+        # 若指定了确定性目标深度 (depth < STANDARD_DEPTH，如 22)，
+        # 深度是唯一的停止准则，不设置硬性时间限制避免浅层截断，仅保留 60s 作为异常兜底；
+        # 若未指定深度上限（如 deep 档位），则由总时间预算决定引擎退出时机。
+        if depth < STANDARD_DEPTH:
+            engine_time_limit = max(total_time_s, 60.0) if total_time_s is not None else 60.0
+        else:
+            engine_time_limit = total_time_s if total_time_s is not None else 60.0
 
         step1_history: dict[int, dict[int, dict[str, Any]]] = collections.defaultdict(dict)
         step2_history: dict[int, dict[str, Any]] = {}
@@ -721,7 +725,11 @@ class StockfishAnalyzer:
             )
             step2_run = False
             elapsed_step1 = time.perf_counter() - t0
-            remain_time_s = max(0.0, total_time_s - elapsed_step1)
+            remain_time_s = (
+                max(0.0, total_time_s - elapsed_step1)
+                if total_time_s is not None
+                else 60.0
+            )
             if not played_in_candidates and remain_time_s >= 0.03 and not cancel_event.is_set():
                 step2_run = True
                 try:
@@ -878,8 +886,8 @@ class StockfishAnalyzer:
             raise ValueError("Position is already terminal (checkmate or draw)")
 
         prof_cfg = PROFILES.get(profile or "standard", PROFILES["standard"])
-        effective_depth = STANDARD_DEPTH if depth is None else int(depth)
-        effective_max_time_ms = prof_cfg["maxTimeMs"] if max_time_ms is None else int(max_time_ms)
+        effective_depth = prof_cfg.get("depth", STANDARD_DEPTH) if depth is None else int(depth)
+        effective_max_time_ms = prof_cfg.get("maxTimeMs") if max_time_ms is None else int(max_time_ms)
         effective_multi_pv = prof_cfg["multiPv"] if multi_pv is None else max(1, int(multi_pv))
         effective_max_pv_plies = (
             prof_cfg.get("maxPvPlies", DEFAULT_MAX_PV_PLIES)
@@ -907,12 +915,15 @@ class StockfishAnalyzer:
             return result
 
         start_time = time.perf_counter()
-        time_limit_s = max(0.1, effective_max_time_ms / 1000.0)
-        engine_time_limit = (
-            max(time_limit_s, 20.0)
-            if effective_depth < STANDARD_DEPTH
-            else time_limit_s
+        total_time_s = (
+            max(0.1, effective_max_time_ms / 1000.0)
+            if effective_max_time_ms is not None
+            else None
         )
+        if effective_depth < STANDARD_DEPTH:
+            engine_time_limit = max(total_time_s, 60.0) if total_time_s is not None else 60.0
+        else:
+            engine_time_limit = total_time_s if total_time_s is not None else 60.0
 
         depth_history: dict[int, dict[int, dict[str, Any]]] = collections.defaultdict(dict)
         last_info: dict[str, Any] = {}

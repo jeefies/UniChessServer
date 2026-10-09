@@ -211,7 +211,7 @@ class StockfishAnalysisEngineTestCase(unittest.TestCase):
         self.assertIn("Illegal playedMove", str(ctx.exception))
 
     def test_analyze_move_lightning_profile(self):
-        # 极速档：目标深度 22，硬时间 600ms，双路并发
+        # 极速档：目标深度 22，搜满 22 层即停，不限时间预算，双路并发
         res = self.analyzer.analyze_move(
             initial_fen=None,
             moves=["e2e4", "e7e5", "g1f3", "b8c6"],
@@ -221,9 +221,19 @@ class StockfishAnalysisEngineTestCase(unittest.TestCase):
         )
         self.assertTrue(res["comparison"]["canCompare"])
         self.assertEqual(res["played"]["move"], "a2a3")
-        self.assertLessEqual(res["stats"]["elapsedMs"], 3500)
-        self.assertGreaterEqual(res["comparison"]["commonDepth"], 22)
+        self.assertEqual(res["comparison"]["commonDepth"], 22)
         self.assertTrue(res["engine"]["parallelTwoStage"])
+
+    def test_evaluate_lightning_profile(self):
+        # 极速档：evaluate 同样在搜满 22 层后即刻退出
+        res = self.analyzer.evaluate(
+            initial_fen=None,
+            moves=["e2e4", "e7e5"],
+            profile="lightning",
+            request_id="test-lightning-eval-001",
+        )
+        self.assertEqual(res["completedDepth"], 22)
+        self.assertEqual(len(res["candidates"]), 1)
 
     def test_opening_classification(self):
         # 意大利定式走法：f1c4

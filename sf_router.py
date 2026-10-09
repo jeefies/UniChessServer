@@ -44,11 +44,11 @@ OPENAPI_DESCRIPTION = """## Stockfish 国际象棋无状态深度分析服务（
    - `diffCp = played.score.value - best.score.value`：通常为 <= 0，表示走这一步相较最佳着法的厘兵损失。
 
 ### 分析档位（Profiles）：
-- **`lightning`（极速档，推荐 AI 对话场景使用）**：目标深度 22 层。**服务端严格保证搜索深度达到 22 层才停止返回**（或残局瞬解/杀棋），单候选 + 实战走法双路并行，耗时通常在 500ms ~ 1000ms。
-- **`fast`（快档）**：目标深度 22 层，搜满 22 层停止，双候选 MultiPV=2。
-- **`standard`（标准档）**：标准深度 128，时间预算 4.0 秒，双候选。
-- **`deep`（深度档）**：标准深度 128，时间预算 4.0 秒。
-- **`ultra`（超深档）**：标准深度 128，时间预算 10.0 秒。
+- **`lightning`（极速档，推荐 AI 对话场景使用）**：纯基于目标深度 22 层驱动，**严格搜满 22 层即停，不设时间预算限制**（仅保留 60s 异常安全兜底），单候选 + 实战走法双路并行推演。
+- **`fast`（快档）**：纯基于目标深度 22 层驱动，严格搜满 22 层即停，不限时间预算，双候选 MultiPV=2。
+- **`standard`（标准档）**：时间预算 4.0 秒，深度上限 128，双候选。
+- **`deep`（深度档）**：纯基于时间预算驱动（4.0 秒），不限制层数（深度上限 128），进行充分深入推演（通常可达 24~30+ 层）。
+- **`ultra`（超深档）**：纯基于时间预算驱动（10.0 秒），不限制层数（深度上限 128），用于关键着法极限推演。
 
 ### 开局定式与残局库扩展能力：
 1. **开局定式识别（`opening`）**：
@@ -105,10 +105,10 @@ class PositionInput(BaseModel):
 
 class MoveAnalysisLimits(BaseModel):
     depth: int | None = Field(
-        STANDARD_DEPTH, description="搜索深度上限，标准深度固定为 128。"
+        None, description="搜索深度上限；若省略则继承 profile（如 lightning 默认为 22，其余默认为 128）。"
     )
     maxTimeMs: int | None = Field(
-        DEFAULT_MAX_TIME_MS, description="总时间预算（毫秒），覆盖全部搜索步骤。"
+        None, description="总时间预算（毫秒）；若省略则继承 profile（如 deep 默认为 4000，lightning 不限时间预算）。"
     )
 
 

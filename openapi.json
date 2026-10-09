@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Stockfish Chess Analysis Service API",
-    "description": "## Stockfish 国际象棋无状态深度分析服务（API 指南与约束）\n\n面向移动端与 AI Agent 的高性能国际象棋分析服务。所有接口均为纯无状态设计，服务端不存储对局记录或用户数据。\n\n### 核心物理量与度量口径（AI 调用必须遵循）：\n1. **统一行棋方视角（Root Perspective）**：\n   - 所有的分数值（score）与胜平负概率（wdl）均恒从**当前请求根局面的走子方（Side to Move）**视角给出：\n   - 正值（+）表示当前走子方优势，负值（-）表示劣势。\n2. **单位度量**：\n   - `cp`：厘兵（centipawns），100 cp = 1 个兵。\n   - `mate`：将杀步数，正数为我方将杀对手，负数为我方被对手将杀。\n   - `wdl`：胜平负千分比，win + draw + loss = 1000。\n3. **局面重构约束（Threefold Repetition）**：\n   - 请求必须携带 `initialFen` 加上完整的历史 UCI 走法列表 `moves`，服务端从初始局面推演，以准确识别**三次重复局面**和五十步和棋规则。\n4. **同深度对拍（Fair Comparison）**：\n   - `/sf/v1/analyze-move` 会双路并行对根局面搜索最佳候选与实战走法 `playedMove`；\n   - 最终比对保证在两者的**共同完成深度（commonDepth）**下对齐，绝不跨深度比较。\n   - `diffCp = played.score.value - best.score.value`：通常为 <= 0，表示走这一步相较最佳着法的厘兵损失。\n\n### 分析档位（Profiles）：\n- **`lightning`（极速档，推荐 AI 对话场景使用）**：目标深度 22 层。**服务端严格保证搜索深度达到 22 层才停止返回**（或残局瞬解/杀棋），单候选 + 实战走法双路并行，耗时通常在 500ms ~ 1000ms。\n- **`fast`（快档）**：目标深度 22 层，搜满 22 层停止，双候选 MultiPV=2。\n- **`standard`（标准档）**：标准深度 128，时间预算 4.0 秒，双候选。\n- **`deep`（深度档）**：标准深度 128，时间预算 4.0 秒。\n- **`ultra`（超深档）**：标准深度 128，时间预算 10.0 秒。\n\n### 开局定式与残局库扩展能力：\n1. **开局定式识别（`opening`）**：\n   - 服务端内置完整 ECO 开局前缀树，自动返回当前局面所处的定式名称（如 `name: \"西班牙开局 柏林防御\"`）、定式标记（`theory: true/false`）及定式匹配半步序。\n2. **Syzygy 3-4-5 残局库（Tablebase）**：\n   - 服务端常驻挂载 Syzygy 3-4-5 残局表，3-5 子局面可瞬间命中查表，深度直接穿透至 72~128 层，并在 `stats.tbhits` 返回残局库探测命中次数。\n\n### 辅助棋力评语分类标准（供 AI 解说棋步）：\n- `diffCp == 0` 或 `played == best`：🌟 最佳着法 (Best Move)\n- `-15 <= diffCp < 0`：✅ 优秀着法 (Excellent)\n- `-40 <= diffCp < -15`：👍 良好着法 (Good)\n- `-100 <= diffCp < -40`：⚠️ 轻微缓着 (Inaccuracy)\n- `-250 <= diffCp < -100`：❓ 疑问着 / 错误 (Mistake)\n- `diffCp < -250`：❌ 严重大漏 (Blunder)\n",
+    "description": "## Stockfish 国际象棋无状态深度分析服务（API 指南与约束）\n\n面向移动端与 AI Agent 的高性能国际象棋分析服务。所有接口均为纯无状态设计，服务端不存储对局记录或用户数据。\n\n### 核心物理量与度量口径（AI 调用必须遵循）：\n1. **统一行棋方视角（Root Perspective）**：\n   - 所有的分数值（score）与胜平负概率（wdl）均恒从**当前请求根局面的走子方（Side to Move）**视角给出：\n   - 正值（+）表示当前走子方优势，负值（-）表示劣势。\n2. **单位度量**：\n   - `cp`：厘兵（centipawns），100 cp = 1 个兵。\n   - `mate`：将杀步数，正数为我方将杀对手，负数为我方被对手将杀。\n   - `wdl`：胜平负千分比，win + draw + loss = 1000。\n3. **局面重构约束（Threefold Repetition）**：\n   - 请求必须携带 `initialFen` 加上完整的历史 UCI 走法列表 `moves`，服务端从初始局面推演，以准确识别**三次重复局面**和五十步和棋规则。\n4. **同深度对拍（Fair Comparison）**：\n   - `/sf/v1/analyze-move` 会双路并行对根局面搜索最佳候选与实战走法 `playedMove`；\n   - 最终比对保证在两者的**共同完成深度（commonDepth）**下对齐，绝不跨深度比较。\n   - `diffCp = played.score.value - best.score.value`：通常为 <= 0，表示走这一步相较最佳着法的厘兵损失。\n\n### 分析档位（Profiles）：\n- **`lightning`（极速档，推荐 AI 对话场景使用）**：纯基于目标深度 22 层驱动，**严格搜满 22 层即停，不设时间预算限制**（仅保留 60s 异常安全兜底），单候选 + 实战走法双路并行推演。\n- **`fast`（快档）**：纯基于目标深度 22 层驱动，严格搜满 22 层即停，不限时间预算，双候选 MultiPV=2。\n- **`standard`（标准档）**：时间预算 4.0 秒，深度上限 128，双候选。\n- **`deep`（深度档）**：纯基于时间预算驱动（4.0 秒），不限制层数（深度上限 128），进行充分深入推演（通常可达 24~30+ 层）。\n- **`ultra`（超深档）**：纯基于时间预算驱动（10.0 秒），不限制层数（深度上限 128），用于关键着法极限推演。\n\n### 开局定式与残局库扩展能力：\n1. **开局定式识别（`opening`）**：\n   - 服务端内置完整 ECO 开局前缀树，自动返回当前局面所处的定式名称（如 `name: \"西班牙开局 柏林防御\"`）、定式标记（`theory: true/false`）及定式匹配半步序。\n2. **Syzygy 3-4-5 残局库（Tablebase）**：\n   - 服务端常驻挂载 Syzygy 3-4-5 残局表，3-5 子局面可瞬间命中查表，深度直接穿透至 72~128 层，并在 `stats.tbhits` 返回残局库探测命中次数。\n\n### 辅助棋力评语分类标准（供 AI 解说棋步）：\n- `diffCp == 0` 或 `played == best`：🌟 最佳着法 (Best Move)\n- `-15 <= diffCp < 0`：✅ 优秀着法 (Excellent)\n- `-40 <= diffCp < -15`：👍 良好着法 (Good)\n- `-100 <= diffCp < -40`：⚠️ 轻微缓着 (Inaccuracy)\n- `-250 <= diffCp < -100`：❓ 疑问着 / 错误 (Mistake)\n- `diffCp < -250`：❌ 严重大漏 (Blunder)\n",
     "version": "1.0.0"
   },
   "paths": {
@@ -642,8 +642,7 @@
               }
             ],
             "title": "Depth",
-            "description": "搜索深度上限，标准深度固定为 128。",
-            "default": 128
+            "description": "搜索深度上限；若省略则继承 profile（如 lightning 默认为 22，其余默认为 128）。"
           },
           "maxTimeMs": {
             "anyOf": [
@@ -655,8 +654,7 @@
               }
             ],
             "title": "Maxtimems",
-            "description": "总时间预算（毫秒），覆盖全部搜索步骤。",
-            "default": 4000
+            "description": "总时间预算（毫秒）；若省略则继承 profile（如 deep 默认为 4000，lightning 不限时间预算）。"
           }
         },
         "type": "object",
