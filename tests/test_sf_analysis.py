@@ -388,14 +388,21 @@ class SfApiRoutesIntegrationTestCase(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Illegal playedMove", resp.json()["detail"])
 
-    def test_openapi_json_endpoint_is_public(self):
+    def test_openapi_json_endpoint_requires_token(self):
         if not _HAS_TESTCLIENT:
             raise unittest.SkipTest("starlette TestClient 不可用")
         client = TestClient(app.app)
-        # 无需任何 Token 请求头，模拟代理请求
-        resp = client.get(
+        # 1. 无口令的外部代理请求应被严格拦截 401
+        resp_unauth = client.get(
             "/sf/v1/openapi.json",
             headers={"x-forwarded-for": "1.2.3.4"},
+        )
+        self.assertEqual(resp_unauth.status_code, 401)
+
+        # 2. 带有效访问口令请求应返回 200
+        resp = client.get(
+            "/sf/v1/openapi.json",
+            headers={"Authorization": "Bearer sf-token-123", "x-forwarded-for": "1.2.3.4"},
         )
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
@@ -537,7 +544,7 @@ class SfApiRoutesIntegrationTestCase(unittest.TestCase):
         client = TestClient(app.app)
         resp = client.get(
             "/sf/v1/openapi.json",
-            headers={"x-forwarded-for": "1.2.3.4"},
+            headers={"Authorization": "Bearer sf-token-123", "x-forwarded-for": "1.2.3.4"},
         )
         self.assertEqual(resp.status_code, 200)
         data = resp.json()

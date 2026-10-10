@@ -377,11 +377,9 @@ def health():
     return {"status": "ok", "models": model_registry.available_models()}
 
 
-# 挂载 Stockfish 远端分析服务路由（统一 /sf/v1 前缀与 /api/sf/v1 别名）
+# 挂载 Stockfish 远端分析服务路由（统一 /sf/v1 前缀与 /api/sf/v1 别名，全量要求访问口令）
 app.include_router(sf_router.router)
 app.include_router(sf_router.api_router)
-app.include_router(sf_router.public_sf_router)
-app.include_router(sf_router.public_api_router)
 
 
 # 静态前端（对局页），迁移自旧 unichess-server。

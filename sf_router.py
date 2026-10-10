@@ -79,17 +79,6 @@ api_router = APIRouter(
     dependencies=[Depends(access_auth.require_access_token)],
 )
 
-# 公开给 AI / Agent / GPT Actions 读取 Schema 的公开端点（无需口令）
-public_sf_router = APIRouter(
-    prefix="/sf/v1",
-    tags=["Stockfish Spec"],
-)
-
-public_api_router = APIRouter(
-    prefix="/api/sf/v1",
-    tags=["Stockfish Spec"],
-)
-
 
 # --- 请求模型 ---
 
@@ -272,8 +261,8 @@ class ReviewGameResponse(BaseModel):
 
 # --- 端点定义 ---
 
-@public_sf_router.get("/openapi.json", include_in_schema=False)
-@public_api_router.get("/openapi.json", include_in_schema=False)
+@router.get("/openapi.json", include_in_schema=False)
+@api_router.get("/openapi.json", include_in_schema=False)
 def get_sf_openapi() -> dict[str, Any]:
     """生成并返回专供 AI / Agent 使用的 Stockfish 分析 API OpenAPI 3.1 描述。"""
     from fastapi.openapi.utils import get_openapi
