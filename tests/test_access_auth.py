@@ -228,15 +228,15 @@ class RouteTableTestCase(unittest.TestCase):
         ungated = sorted(r.path for r in sf_routes if not self._gated(r))
         self.assertEqual(ungated, [], f"这些 /sf 算力路由漏挂门禁: {ungated}")
 
-    def test_sf_openapi_is_public(self):
-        # /sf/v1/openapi.json 与 /api/sf/v1/openapi.json 专供 AI / Agent 读取规范，不需要门禁
+    def test_sf_openapi_is_gated(self):
+        # /sf/v1/openapi.json 与 /api/sf/v1/openapi.json 同样必须挂门禁，全站无任何免鉴权接口
         open_routes = [
             r for r in self._routes()
             if r.path in ("/sf/v1/openapi.json", "/api/sf/v1/openapi.json")
         ]
         self.assertEqual(len(open_routes), 2)
         for r in open_routes:
-            self.assertFalse(self._gated(r), f"{r.path} 不应该挂门禁")
+            self.assertTrue(self._gated(r), f"{r.path} 必须挂门禁")
 
     def test_docs_and_openapi_disabled(self):
         paths = {r.path for r in self._routes()}
