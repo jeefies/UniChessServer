@@ -556,6 +556,51 @@ class SfApiRoutesIntegrationTestCase(unittest.TestCase):
         self.assertIn("GameReviewSummary", schemas)
         self.assertIn("GameMoveItem", schemas)
 
+    def test_cached_result_without_engine_does_not_500(self):
+        # 验证历史遗留/批量复盘写入的不带 engine 字段的缓存记录不会触发 500 校验异常
+        analyzer = sf_analyzer.get_analyzer()
+        cache_key = (
+            "analyze_move",
+            "",
+            ("e2e4",),
+            "e7e5",
+            22,
+            None,
+            1,
+            12,
+            analyzer._get_identity(),
+        )
+        fake_legacy_cached = {
+            "best": {"move": "g1f3", "depth": 22, "score": {"type": "cp", "value": 30}, "wdl": {"win": 400, "draw": 500, "loss": 100}, "pv": ["g1f3"]},
+            "played": {"move": "e7e5", "depth": 22, "score": {"type": "cp", "value": 25}, "wdl": {"win": 390, "draw": 510, "loss": 100}, "pv": ["e7e5"]},
+            "second": None,
+            "previousBest": None,
+            "comparison": {"canCompare": True, "commonDepth": 22, "diffCp": -5, "diffWdlLoss": 0},
+            "stats": {"elapsedMs": 100, "cached": True},
+            "opening": {"name": "开放性布局 (Open Game)", "theory": True, "ply": 2},
+        }
+        analyzer._cache[cache_key] = fake_legacy_cached
+        try:
+            res = analyzer.analyze_move(
+                initial_fen=None,
+                moves=["e2e4"],
+                played_move="e7e5",
+                profile="lightning",
+            )
+            self.assertIn("engine", res)
+            self.assertEqual(res["stats"]["cached"], True)
+            if _HAS_TESTCLIENT:
+                client = TestClient(app.app)
+                resp = client.post(
+                    "/sf/v1/analyze-move",
+                    json={"position": {"moves": ["e2e4"]}, "playedMove": "e7e5", "profile": "lightning"},
+                    headers={"Authorization": "Bearer sf-token-123", "x-forwarded-for": "1.2.3.4"},
+                )
+                self.assertEqual(resp.status_code, 200, f"应返回 200 而非 500: {resp.text}")
+                self.assertIn("engine", resp.json())
+        finally:
+            analyzer._cache.pop(cache_key, None)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -200,8 +200,8 @@ class AnalyzeMoveResponse(BaseModel):
     )
     comparison: ComparisonResult = Field(..., description="同深度对比结果")
     opening: OpeningInfo | None = Field(None, description="开局理论名称与体系识别信息")
-    engine: dict[str, Any] = Field(..., description="引擎版本与运行配置")
-    stats: EngineStats = Field(..., description="耗时与搜索统计")
+    engine: dict[str, Any] = Field(default_factory=dict, description="引擎版本与运行配置")
+    stats: EngineStats = Field(default_factory=EngineStats, description="耗时与搜索统计")
 
 
 class EvaluateResponse(BaseModel):
@@ -210,8 +210,8 @@ class EvaluateResponse(BaseModel):
     best: EvalItem | None = Field(None, description="最佳走法")
     candidates: list[EvalItem] = Field(default_factory=list, description="各候选走法评分排序列表")
     opening: OpeningInfo | None = Field(None, description="开局理论名称与体系识别信息")
-    engine: dict[str, Any] = Field(..., description="引擎版本与运行配置")
-    stats: EngineStats = Field(..., description="耗时与搜索统计")
+    engine: dict[str, Any] = Field(default_factory=dict, description="引擎版本与运行配置")
+    stats: EngineStats = Field(default_factory=EngineStats, description="耗时与搜索统计")
 
 
 class ReviewGameRequest(BaseModel):

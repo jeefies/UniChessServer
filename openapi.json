@@ -389,9 +389,7 @@
         "type": "object",
         "required": [
           "best",
-          "comparison",
-          "engine",
-          "stats"
+          "comparison"
         ],
         "title": "AnalyzeMoveResponse"
       },
@@ -719,9 +717,7 @@
         },
         "type": "object",
         "required": [
-          "completedDepth",
-          "engine",
-          "stats"
+          "completedDepth"
         ],
         "title": "EvaluateResponse"
       },

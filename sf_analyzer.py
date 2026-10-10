@@ -763,9 +763,18 @@ class StockfishAnalyzer:
         cached = self._get_from_cache(cache_key)
         if cached is not None:
             result = dict(cached)
-            result["stats"] = dict(result["stats"])
+            result["stats"] = dict(result.get("stats") or {})
             result["stats"]["cached"] = True
             result["requestId"] = request_id
+            if not result.get("engine"):
+                result["engine"] = {
+                    "name": self._engine_identity,
+                    "profile": profile or "standard",
+                    "threads": self.threads,
+                    "helperThreads": 0,
+                    "hashMb": self.hash_mb,
+                    "parallelTwoStage": False,
+                }
             return result
 
         # 4. 进入排队与引擎互斥执行
@@ -1226,9 +1235,16 @@ class StockfishAnalyzer:
         cached = self._get_from_cache(cache_key)
         if cached is not None:
             result = dict(cached)
-            result["stats"] = dict(result["stats"])
+            result["stats"] = dict(result.get("stats") or {})
             result["stats"]["cached"] = True
             result["requestId"] = request_id
+            if not result.get("engine"):
+                result["engine"] = {
+                    "name": self._engine_identity,
+                    "profile": profile or "standard",
+                    "threads": self.threads,
+                    "hashMb": self.hash_mb,
+                }
             return result
 
         start_time = time.perf_counter()
@@ -1488,6 +1504,14 @@ class StockfishAnalyzer:
 
                             opening_info = self._opening_clf.classify(prefix_moves, played)
                             res["opening"] = opening_info
+                            res["engine"] = {
+                                "name": self._engine_identity,
+                                "profile": profile or "lightning",
+                                "threads": actual_threads_per_worker,
+                                "helperThreads": 0,
+                                "hashMb": hash_per_worker,
+                                "parallelTwoStage": False,
+                            }
 
                             cd = res.get("comparison", {}).get("commonDepth", depth)
                             cache_key = (
