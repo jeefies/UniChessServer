@@ -459,5 +459,96 @@ class SfApiRoutesIntegrationTestCase(unittest.TestCase):
         self.assertIn("diskCacheRecords", data["memory"])
 
 
+    def test_classify_move_judgment_and_accuracy(self):
+        # 0 cp 或同一招法 -> best, 100%
+        self.assertEqual(sf_analyzer.classify_move_judgment(0, "e2e4", "e2e4"), "best")
+        self.assertEqual(sf_analyzer.calculate_move_accuracy(0), 100.0)
+        self.assertEqual(sf_analyzer.calculate_move_accuracy(None), 100.0)
+
+        # -15 cp -> excellent
+        self.assertEqual(sf_analyzer.classify_move_judgment(-15, "g1f3", "e2e4"), "excellent")
+        self.assertTrue(sf_analyzer.calculate_move_accuracy(-15) > 90.0)
+
+        # -35 cp -> good
+        self.assertEqual(sf_analyzer.classify_move_judgment(-35, "b1c3", "e2e4"), "good")
+
+        # -80 cp -> inaccuracy
+        self.assertEqual(sf_analyzer.classify_move_judgment(-80, "d2d3", "e2e4"), "inaccuracy")
+
+        # -180 cp -> mistake
+        self.assertEqual(sf_analyzer.classify_move_judgment(-180, "h2h4", "e2e4"), "mistake")
+
+        # -350 cp -> blunder
+        self.assertEqual(sf_analyzer.classify_move_judgment(-350, "f2f3", "e2e4"), "blunder")
+        self.assertTrue(sf_analyzer.calculate_move_accuracy(-350) < 30.0)
+
+    def test_review_game_endpoint(self):
+        if not _HAS_TESTCLIENT:
+            raise unittest.SkipTest("starlette TestClient 不可用")
+        client = TestClient(app.app)
+        payload = {
+            "moves": ["e2e4", "e7e5", "g1f3", "b8c6"],
+            "profile": "lightning",
+            "concurrency": 2,
+        }
+        resp = client.post(
+            "/sf/v1/review",
+            json=payload,
+            headers={"Authorization": "Bearer sf-token-123", "x-forwarded-for": "1.2.3.4"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["totalPlies"], 4)
+        self.assertEqual(data["analyzedPlies"], 4)
+        self.assertIn("summary", data)
+        self.assertIn("whiteAccuracy", data["summary"])
+        self.assertIn("blackAccuracy", data["summary"])
+        self.assertIn("whiteJudgments", data["summary"])
+        self.assertEqual(len(data["moves"]), 4)
+        for m in data["moves"]:
+            self.assertIn("judgment", m)
+            self.assertIn("accuracy", m)
+            self.assertIn("san", m)
+
+    def test_review_game_with_pgn(self):
+        if not _HAS_TESTCLIENT:
+            raise unittest.SkipTest("starlette TestClient 不可用")
+        client = TestClient(app.app)
+        pgn_text = "1. e4 c5 2. Nf3 d6 3. d4 cxd4 *"
+        payload = {
+            "pgn": pgn_text,
+            "profile": "lightning",
+        }
+        resp = client.post(
+            "/sf/v1/analyze-game",
+            json=payload,
+            headers={"Authorization": "Bearer sf-token-123", "x-forwarded-for": "1.2.3.4"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["totalPlies"], 6)
+        self.assertEqual(data["analyzedPlies"], 6)
+        self.assertEqual(data["moves"][0]["san"], "e4")
+        self.assertEqual(data["moves"][1]["san"], "c5")
+
+    def test_openapi_contains_review_endpoints(self):
+        if not _HAS_TESTCLIENT:
+            raise unittest.SkipTest("starlette TestClient 不可用")
+        client = TestClient(app.app)
+        resp = client.get(
+            "/sf/v1/openapi.json",
+            headers={"x-forwarded-for": "1.2.3.4"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("/sf/v1/review", data["paths"])
+        self.assertIn("/sf/v1/analyze-game", data["paths"])
+        schemas = data["components"]["schemas"]
+        self.assertIn("ReviewGameRequest", schemas)
+        self.assertIn("ReviewGameResponse", schemas)
+        self.assertIn("GameReviewSummary", schemas)
+        self.assertIn("GameMoveItem", schemas)
+
+
 if __name__ == "__main__":
     unittest.main()

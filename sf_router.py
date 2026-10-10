@@ -210,6 +210,66 @@ class EvaluateResponse(BaseModel):
     stats: EngineStats = Field(..., description="耗时与搜索统计")
 
 
+class ReviewGameRequest(BaseModel):
+    requestId: str | None = Field(None, description="请求唯一标识，便于跟踪或取消。")
+    initialFen: str | None = Field(None, description="起始 FEN，缺省为国际象棋标准起始局面。")
+    moves: list[str] = Field(
+        default_factory=list,
+        description="从起始局面开始的全部 UCI 历史走法序列（如 ['e2e4', 'e7e5', ...]）。",
+    )
+    pgn: str | None = Field(
+        None, description="可选 PGN 文本格式棋谱。若传入且 moves 为空，则自动解析其中的 moves 与 FEN。"
+    )
+    profile: str | None = Field(
+        "lightning", description="预设档位（默认 lightning：目标深度 22，极速并行复盘）。"
+    )
+    concurrency: int | None = Field(
+        None, ge=1, le=8, description="并发分析工作引擎进程数（若省略则自适应，Core Ultra 20核默认为4）。"
+    )
+
+
+class GameMoveItem(BaseModel):
+    ply: int = Field(..., description="半步序号（1-indexed）")
+    move: str = Field(..., description="实战 UCI 走法，如 e2e4")
+    san: str | None = Field(None, description="标准代数记谱法（SAN），如 e4, Nf3")
+    turn: str = Field(..., description="行棋方 ('white' 或 'black')")
+    bestMove: str | None = Field(None, description="引擎计算的最佳着法")
+    diffCp: int | None = Field(
+        None, description="厘兵亏损值：0为最佳，负数表示相较最佳着法的损失（厘兵，100 cp = 1 兵）"
+    )
+    diffWdlLoss: int | None = Field(None, description="失败率增加值千分比")
+    judgment: str = Field(
+        ..., description="棋步评语：best(🌟最佳), excellent(👍优秀), good(🆗良好), inaccuracy(⚠️疑问手), mistake(❓失着), blunder(❌败着)"
+    )
+    accuracy: float = Field(..., description="单步准确率百分比（0.0 ~ 100.0）")
+    depth: int = Field(..., description="实际共同完成深度")
+    score: ScoreDetail | None = Field(None, description="行棋方视角的局面评分")
+    wdl: WdlDetail | None = Field(None, description="胜平负千分比概率")
+    opening: OpeningInfo | None = Field(None, description="开局定式识别")
+    cached: bool = Field(False, description="是否命中持久化磁盘缓存")
+    elapsedMs: int = Field(..., description="单步评估计算耗时（毫秒）")
+
+
+class GameReviewSummary(BaseModel):
+    whiteAccuracy: float = Field(..., description="白方全局综合准确率（0.0 ~ 100.0）")
+    blackAccuracy: float = Field(..., description="黑方全局综合准确率（0.0 ~ 100.0）")
+    whiteAcpl: float = Field(..., description="白方平均厘兵损失 (Average Centipawn Loss)")
+    blackAcpl: float = Field(..., description="黑方平均厘兵损失 (Average Centipawn Loss)")
+    whiteJudgments: dict[str, int] = Field(default_factory=dict, description="白方各类着法统计计数")
+    blackJudgments: dict[str, int] = Field(default_factory=dict, description="黑方各类着法统计计数")
+
+
+class ReviewGameResponse(BaseModel):
+    requestId: str | None = Field(None, description="请求标识")
+    totalPlies: int = Field(..., description="对局总半步数")
+    analyzedPlies: int = Field(..., description="实际分析半步数")
+    cacheHits: int = Field(..., description="命中缓存的步数")
+    elapsedMs: int = Field(..., description="全盘并发复盘总耗时（毫秒）")
+    effectivePliesPerSecond: float = Field(..., description="整盘实际复盘吞吐量（步/秒）")
+    summary: GameReviewSummary = Field(..., description="全盘统计摘要（准确率、ACPL、招法统计）")
+    moves: list[GameMoveItem] = Field(..., description="逐步分析评测详情列表")
+
+
 # --- 端点定义 ---
 
 @public_sf_router.get("/openapi.json", include_in_schema=False)
@@ -336,6 +396,67 @@ async def evaluate(req: EvaluateRequest, request: Request) -> dict[str, Any]:
             max_time_ms=max_time_ms,
             multi_pv=req.multiPv,
             max_pv_plies=req.maxPvPlies,
+            request_id=req.requestId,
+            cancel_event=cancel_event,
+        )
+
+    task = loop.run_in_executor(None, run_worker)
+
+    try:
+        while not task.done():
+            if await request.is_disconnected():
+                cancel_event.set()
+                analyzer.cancel(req.requestId)
+                break
+            await asyncio.sleep(0.05)
+
+        return await task
+    except asyncio.CancelledError:
+        cancel_event.set()
+        analyzer.cancel(req.requestId)
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+
+
+@router.post("/review", response_model=ReviewGameResponse)
+@router.post("/analyze-game", response_model=ReviewGameResponse)
+@api_router.post("/review", response_model=ReviewGameResponse)
+@api_router.post("/analyze-game", response_model=ReviewGameResponse)
+async def review_game(req: ReviewGameRequest, request: Request) -> dict[str, Any]:
+    """对整局人类对局进行全盘高并发多核并行复盘，返回每步同深度对比、评语与全局统计。"""
+    analyzer = get_analyzer()
+
+    moves = list(req.moves)
+    initial_fen = req.initialFen
+    if req.pgn and not moves:
+        import io
+        import chess.pgn
+        try:
+            game = chess.pgn.read_game(io.StringIO(req.pgn))
+            if game is None:
+                raise ValueError("无法解析提供的 PGN 棋谱文本")
+            moves = [m.uci() for m in game.mainline_moves()]
+            initial_fen = game.headers.get("FEN") or initial_fen
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"PGN 解析失败: {exc}") from exc
+
+    if not moves:
+        raise HTTPException(status_code=400, detail="必须提供至少包含一步走法的 moves 列表或有效的 pgn 文本")
+
+    cancel_event = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def run_worker():
+        return analyzer.review_game(
+            initial_fen=initial_fen,
+            moves=moves,
+            profile=req.profile,
+            concurrency=req.concurrency,
             request_id=req.requestId,
             cancel_event=cancel_event,
         )
