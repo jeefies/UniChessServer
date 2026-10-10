@@ -559,15 +559,16 @@ class SfApiRoutesIntegrationTestCase(unittest.TestCase):
     def test_cached_result_without_engine_does_not_500(self):
         # 验证历史遗留/批量复盘写入的不带 engine 字段的缓存记录不会触发 500 校验异常
         analyzer = sf_analyzer.get_analyzer()
+        prof = sf_analyzer.PROFILES["lightning"]
         cache_key = (
             "analyze_move",
             "",
             ("e2e4",),
             "e7e5",
-            22,
-            None,
-            1,
-            12,
+            prof["depth"],
+            prof["maxTimeMs"],
+            prof["multiPv"],
+            prof["maxPvPlies"],
             analyzer._get_identity(),
         )
         fake_legacy_cached = {
