@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Stockfish Chess Analysis Service API",
-    "description": "## Stockfish 国际象棋无状态深度分析服务（API 指南与约束）\n\n面向移动端与 AI Agent 的高性能国际象棋分析服务。所有接口均为纯无状态设计，服务端不存储对局记录或用户数据。\n\n### 核心物理量与度量口径（AI 调用必须遵循）：\n1. **统一行棋方视角（Root Perspective）**：\n   - 所有的分数值（score）与胜平负概率（wdl）均恒从**当前请求根局面的走子方（Side to Move）**视角给出：\n   - 正值（+）表示当前走子方优势，负值（-）表示劣势。\n2. **单位度量**：\n   - `cp`：厘兵（centipawns），100 cp = 1 个兵。\n   - `mate`：将杀步数，正数为我方将杀对手，负数为我方被对手将杀。\n   - `wdl`：胜平负千分比，win + draw + loss = 1000。\n3. **局面重构约束（Threefold Repetition）**：\n   - 请求必须携带 `initialFen` 加上完整的历史 UCI 走法列表 `moves`，服务端从初始局面推演，以准确识别**三次重复局面**和五十步和棋规则。\n4. **同深度对拍（Fair Comparison）**：\n   - `/sf/v1/analyze-move` 会双路并行对根局面搜索最佳候选与实战走法 `playedMove`；\n   - 最终比对保证在两者的**共同完成深度（commonDepth）**下对齐，绝不跨深度比较。\n   - `diffCp = played.score.value - best.score.value`：通常为 <= 0，表示走这一步相较最佳着法的厘兵损失。\n\n### 分析档位（Profiles）：\n- **`lightning`（极速档，推荐 AI 对话场景使用）**：纯基于目标深度 22 层驱动，**严格搜满 22 层即停，不设时间预算限制**（仅保留 60s 异常安全兜底），单候选 + 实战走法双路并行推演。\n- **`fast`（快档）**：纯基于目标深度 22 层驱动，严格搜满 22 层即停，不限时间预算，双候选 MultiPV=2。\n- **`standard`（标准档）**：时间预算 4.0 秒，深度上限 128，双候选。\n- **`deep`（深度档）**：纯基于时间预算驱动（4.0 秒），不限制层数（深度上限 128），进行充分深入推演（通常可达 24~30+ 层）。\n- **`ultra`（超深档）**：纯基于时间预算驱动（10.0 秒），不限制层数（深度上限 128），用于关键着法极限推演。\n\n### 开局定式与残局库扩展能力：\n1. **开局定式识别（`opening`）**：\n   - 服务端内置完整 ECO 开局前缀树，自动返回当前局面所处的定式名称（如 `name: \"西班牙开局 柏林防御\"`）、定式标记（`theory: true/false`）及定式匹配半步序。\n2. **Syzygy 3-4-5 残局库（Tablebase）**：\n   - 服务端常驻挂载 Syzygy 3-4-5 残局表，3-5 子局面可瞬间命中查表，深度直接穿透至 72~128 层，并在 `stats.tbhits` 返回残局库探测命中次数。\n\n### 辅助棋力评语分类标准（供 AI 解说棋步）：\n- `diffCp == 0` 或 `played == best`：🌟 最佳着法 (Best Move)\n- `-15 <= diffCp < 0`：✅ 优秀着法 (Excellent)\n- `-40 <= diffCp < -15`：👍 良好着法 (Good)\n- `-100 <= diffCp < -40`：⚠️ 轻微缓着 (Inaccuracy)\n- `-250 <= diffCp < -100`：❓ 疑问着 / 错误 (Mistake)\n- `diffCp < -250`：❌ 严重大漏 (Blunder)\n",
+    "description": "## Stockfish 国际象棋无状态深度分析服务（API 指南与约束）\n\n面向移动端与 AI Agent 的高性能国际象棋分析服务。所有接口均为纯无状态设计，服务端不存储对局记录或用户数据。\n\n### 核心物理量与度量口径（AI 调用必须遵循）：\n1. **统一行棋方视角（Root Perspective）**：\n   - 所有的分数值（score）与胜平负概率（wdl）均恒从**当前请求根局面的走子方（Side to Move）**视角给出：\n   - 正值（+）表示当前走子方优势，负值（-）表示劣势。\n2. **单位度量**：\n   - `cp`：厘兵（centipawns），100 cp = 1 个兵。\n   - `mate`：将杀步数，正数为我方将杀对手，负数为我方被对手将杀。\n   - `wdl`：胜平负千分比，win + draw + loss = 1000。\n3. **局面重构约束（Threefold Repetition）**：\n   - 请求必须携带 `initialFen` 加上完整的历史 UCI 走法列表 `moves`，服务端从初始局面推演，以准确识别**三次重复局面**和五十步和棋规则。\n4. **同深度对拍（Fair Comparison）**：\n   - `/sf/v1/analyze-move` 会双路并行对根局面搜索最佳候选与实战走法 `playedMove`；\n   - 最终比对保证在两者的**共同完成深度（commonDepth）**下对齐，绝不跨深度比较。\n   - `diffCp = played.score.value - best.score.value`：通常为 <= 0，表示走这一步相较最佳着法的厘兵损失。\n\n### 分析档位（Profiles）：\n- **`lightning`（极速档，推荐 AI 对话场景使用）**：纯基于目标深度 22 层驱动，**严格搜满 22 层即停，不设时间预算限制**（仅保留 60s 异常安全兜底），单候选 + 实战走法双路并行推演。\n- **`fast`（快档）**：纯基于目标深度 22 层驱动，严格搜满 22 层即停，不限时间预算，双候选 MultiPV=2。\n- **`standard`（标准档）**：时间预算 4.0 秒，深度上限 128，双候选。\n- **`deep`（深度档）**：纯基于时间预算驱动（4.0 秒），不限制层数（深度上限 128），进行充分深入推演（通常可达 24~30+ 层）。\n- **`ultra`（超深档）**：纯基于时间预算驱动（10.0 秒），不限制层数（深度上限 128），用于关键着法极限推演。\n\n### 开局定式与残局库扩展能力：\n1. **开局定式识别（`opening`）**：\n   - 服务端内置完整 ECO 开局前缀树，自动返回当前局面所处的定式名称（如 `name: \"西班牙开局 柏林防御\"`）、定式标记（`theory: true/false`）及定式匹配半步序。\n2. **Syzygy 3-4-5 残局库（Tablebase）**：\n   - 服务端常驻挂载 Syzygy 3-4-5 残局表，3-5 子局面可瞬间命中查表，深度直接穿透至 72~128 层，并在 `stats.tbhits` 返回残局库探测命中次数。\n\n### 全盘复盘与整局批量分析（Batch Game Review）：\n提供 `/sf/v1/review` 与 `/sf/v1/analyze-game` 端点（两者等价互为别名），用于对整盘对局进行多核高并发并行复盘：\n1. **两种批量提交方式**：\n   - **方式 A（推荐，精确）**：直接传入 UCI 着法列表 `moves: [\"e2e4\", \"e7e5\", \"g1f3\", ...]`，可配合可选的 `initialFen`（用于残局、打谱或特殊开局）。\n   - **方式 B（便捷，直传）**：直接传入原始 PGN 字符串 `pgn: \"1. e4 e5 2. Nf3 Nc6 ...\"`，服务端自动解析着法序列与起始 FEN。\n2. **高并发并行调度机制**：\n   - 服务端启动轻量多 Worker 引擎池（20 核主机默认分配 16 路独立单线程引擎，满核并行推演），在目标深度 22 层下以约 4 步/秒的极速吞吐消化整盘棋；\n   - 89 步实战对局冷启动复盘耗时仅约 22 秒，历史已分析步数走 SQLite 磁盘缓存（<1ms 瞬时命中）；\n   - 并发分析完成后，所有 Worker 引擎自动销毁并触发垃圾回收，零常驻系统资源浪费。\n3. **返回数据与统计指标**：\n   - `summary.whiteAccuracy` / `summary.blackAccuracy`：白方与黑方的全局综合着法准确率百分比（0.0 ~ 100.0%）；\n   - `summary.whiteAcpl` / `summary.blackAcpl`：双方法定平均厘兵损失（ACPL）；\n   - `summary.whiteJudgments` / `summary.blackJudgments`：双方法定六级着法评语统计分布（🌟best, 👍excellent, 🆗good, ⚠️inaccuracy, ❓mistake, ❌blunder）；\n   - `moves`：逐步对拍详情列表，包含每步实战走法、最佳推荐走法、厘兵亏损 `diffCp`、单步准确率 `accuracy`、着法评语 `judgment` 及单步计算耗时。\n\n### 辅助棋力评语分类标准（供 AI 解说棋步）：\n- `diffCp == 0` 或 `played == best`：🌟 最佳着法 (Best Move)\n- `-15 <= diffCp < 0`：✅ 优秀着法 (Excellent)\n- `-40 <= diffCp < -15`：👍 良好着法 (Good)\n- `-100 <= diffCp < -40`：⚠️ 轻微缓着 (Inaccuracy)\n- `-250 <= diffCp < -100`：❓ 疑问着 / 错误 (Mistake)\n- `diffCp < -250`：❌ 严重大漏 (Blunder)\n",
     "version": "1.0.0"
   },
   "paths": {
@@ -23,6 +23,30 @@
                   "additionalProperties": true,
                   "type": "object",
                   "title": "Response Health Sf V1 Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sf/v1/release": {
+      "post": {
+        "tags": [
+          "Stockfish Analysis"
+        ],
+        "summary": "Release Engines",
+        "description": "主动释放 Stockfish 引擎常驻内存（关闭子进程并归还约 1.5GB 内存）。",
+        "operationId": "release_engines_sf_v1_release_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Release Engines Sf V1 Release Post"
                 }
               }
             }
@@ -97,6 +121,90 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EvaluateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sf/v1/analyze-game": {
+      "post": {
+        "tags": [
+          "Stockfish Analysis"
+        ],
+        "summary": "Review Game",
+        "description": "对整局人类对局进行全盘高并发多核并行复盘，返回每步同深度对比、评语与全局统计。",
+        "operationId": "review_game_sf_v1_analyze_game_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewGameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewGameResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sf/v1/review": {
+      "post": {
+        "tags": [
+          "Stockfish Analysis"
+        ],
+        "summary": "Review Game",
+        "description": "对整局人类对局进行全盘高并发多核并行复盘，返回每步同深度对比、评语与全局统计。",
+        "operationId": "review_game_sf_v1_review_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewGameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewGameResponse"
                 }
               }
             }
@@ -617,6 +725,191 @@
         ],
         "title": "EvaluateResponse"
       },
+      "GameMoveItem": {
+        "properties": {
+          "ply": {
+            "type": "integer",
+            "title": "Ply",
+            "description": "半步序号（1-indexed）"
+          },
+          "move": {
+            "type": "string",
+            "title": "Move",
+            "description": "实战 UCI 走法，如 e2e4"
+          },
+          "san": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "San",
+            "description": "标准代数记谱法（SAN），如 e4, Nf3"
+          },
+          "turn": {
+            "type": "string",
+            "title": "Turn",
+            "description": "行棋方 ('white' 或 'black')"
+          },
+          "bestMove": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bestmove",
+            "description": "引擎计算的最佳着法"
+          },
+          "diffCp": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diffcp",
+            "description": "厘兵亏损值：0为最佳，负数表示相较最佳着法的损失（厘兵，100 cp = 1 兵）"
+          },
+          "diffWdlLoss": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diffwdlloss",
+            "description": "失败率增加值千分比"
+          },
+          "judgment": {
+            "type": "string",
+            "title": "Judgment",
+            "description": "棋步评语：best(🌟最佳), excellent(👍优秀), good(🆗良好), inaccuracy(⚠️疑问手), mistake(❓失着), blunder(❌败着)"
+          },
+          "accuracy": {
+            "type": "number",
+            "title": "Accuracy",
+            "description": "单步准确率百分比（0.0 ~ 100.0）"
+          },
+          "depth": {
+            "type": "integer",
+            "title": "Depth",
+            "description": "实际共同完成深度"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoreDetail"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "行棋方视角的局面评分"
+          },
+          "wdl": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WdlDetail"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "胜平负千分比概率"
+          },
+          "opening": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OpeningInfo"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "开局定式识别"
+          },
+          "cached": {
+            "type": "boolean",
+            "title": "Cached",
+            "description": "是否命中持久化磁盘缓存",
+            "default": false
+          },
+          "elapsedMs": {
+            "type": "integer",
+            "title": "Elapsedms",
+            "description": "单步评估计算耗时（毫秒）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ply",
+          "move",
+          "turn",
+          "judgment",
+          "accuracy",
+          "depth",
+          "elapsedMs"
+        ],
+        "title": "GameMoveItem"
+      },
+      "GameReviewSummary": {
+        "properties": {
+          "whiteAccuracy": {
+            "type": "number",
+            "title": "Whiteaccuracy",
+            "description": "白方全局综合准确率（0.0 ~ 100.0）"
+          },
+          "blackAccuracy": {
+            "type": "number",
+            "title": "Blackaccuracy",
+            "description": "黑方全局综合准确率（0.0 ~ 100.0）"
+          },
+          "whiteAcpl": {
+            "type": "number",
+            "title": "Whiteacpl",
+            "description": "白方平均厘兵损失 (Average Centipawn Loss)"
+          },
+          "blackAcpl": {
+            "type": "number",
+            "title": "Blackacpl",
+            "description": "黑方平均厘兵损失 (Average Centipawn Loss)"
+          },
+          "whiteJudgments": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Whitejudgments",
+            "description": "白方各类着法统计计数"
+          },
+          "blackJudgments": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Blackjudgments",
+            "description": "黑方各类着法统计计数"
+          }
+        },
+        "type": "object",
+        "required": [
+          "whiteAccuracy",
+          "blackAccuracy",
+          "whiteAcpl",
+          "blackAcpl"
+        ],
+        "title": "GameReviewSummary"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -711,6 +1004,147 @@
         },
         "type": "object",
         "title": "PositionInput"
+      },
+      "ReviewGameRequest": {
+        "properties": {
+          "requestId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestid",
+            "description": "请求唯一标识，便于跟踪或取消。"
+          },
+          "initialFen": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Initialfen",
+            "description": "起始 FEN，缺省为国际象棋标准起始局面。"
+          },
+          "moves": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Moves",
+            "description": "从起始局面开始的全部 UCI 历史走法序列（如 ['e2e4', 'e7e5', ...]）。"
+          },
+          "pgn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pgn",
+            "description": "可选 PGN 文本格式棋谱。若传入且 moves 为空，则自动解析其中的 moves 与 FEN。"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile",
+            "description": "预设档位（默认 lightning：目标深度 22，极速并行复盘）。",
+            "default": "lightning"
+          },
+          "concurrency": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 20.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Concurrency",
+            "description": "并发分析工作引擎进程数（若省略则自适应，20核主机默认分配 16 路单线程并行加速）。"
+          }
+        },
+        "type": "object",
+        "title": "ReviewGameRequest"
+      },
+      "ReviewGameResponse": {
+        "properties": {
+          "requestId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestid",
+            "description": "请求标识"
+          },
+          "totalPlies": {
+            "type": "integer",
+            "title": "Totalplies",
+            "description": "对局总半步数"
+          },
+          "analyzedPlies": {
+            "type": "integer",
+            "title": "Analyzedplies",
+            "description": "实际分析半步数"
+          },
+          "cacheHits": {
+            "type": "integer",
+            "title": "Cachehits",
+            "description": "命中缓存的步数"
+          },
+          "elapsedMs": {
+            "type": "integer",
+            "title": "Elapsedms",
+            "description": "全盘并发复盘总耗时（毫秒）"
+          },
+          "effectivePliesPerSecond": {
+            "type": "number",
+            "title": "Effectivepliespersecond",
+            "description": "整盘实际复盘吞吐量（步/秒）"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/GameReviewSummary",
+            "description": "全盘统计摘要（准确率、ACPL、招法统计）"
+          },
+          "moves": {
+            "items": {
+              "$ref": "#/components/schemas/GameMoveItem"
+            },
+            "type": "array",
+            "title": "Moves",
+            "description": "逐步分析评测详情列表"
+          }
+        },
+        "type": "object",
+        "required": [
+          "totalPlies",
+          "analyzedPlies",
+          "cacheHits",
+          "elapsedMs",
+          "effectivePliesPerSecond",
+          "summary",
+          "moves"
+        ],
+        "title": "ReviewGameResponse"
       },
       "ScoreDetail": {
         "properties": {

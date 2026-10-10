@@ -36,16 +36,18 @@
 - `GET /sf/v1/health` → 引擎就绪状态、版本及支持参数上限
 - `POST /sf/v1/evaluate` → 任意局面的 MultiPV 综合评估及候选走法
 - `POST /sf/v1/analyze-move` → 最佳走法与实战走法的同深度对拍比对
-- `GET /sf/v1/openapi.json` → 专供 AI / Agent / GPT Actions 消费的完整 OpenAPI 3.1 规格描述（公开端点，无需口令，便于外部 AI 平台直接 Import from URL）
+- `POST /sf/v1/review` 或 `POST /sf/v1/analyze-game` → 整盘对局高并发并行复盘（支持 UCI 着法列表或 PGN 文本直传；默认分配 16 路单线程独立 Worker，89 步仅需 22 秒，自动结算双方法定准确率、ACPL 与着法评级分布）
+- `GET /sf/v1/openapi.json` → 专供 AI / Agent / GPT Actions 消费的完整 OpenAPI 3.1 规格描述（受门禁保护）
 
 计算规则与协议特性：
 - **无状态局面重构**：通过 `initialFen` 与 `moves` 列表完整复原棋局，准确判定三次重复局面与 50 步规则。
 - **统一行棋方视角**：分数（厘兵 `cp` 或步数 `mate`）及 `wdl`（千分比，总和 1000）均以根局面当前行棋方为准。
 - **双路并发同深度对拍**：双引擎实例并行推演（主引擎 MultiPV 候选 + 辅助引擎定向推演），并在**共同完成深度（commonDepth）**下对齐比较。
+- **整盘高并发独立加速**：全盘复盘调度 16 路独立单线程引擎满核并行吞吐，0 剪枝冗余，89 步实战对局 22 秒完成深度 22 评测；计算完成后销毁工作引擎，零常驻显存/内存浪费。
 - **Syzygy 残局库无缝集成**：服务端自动挂载 3-4-5 子 Syzygy 残局表（`SyzygyProbeDepth: 1`），残局局面毫秒级直接给出必杀/必和精准步数，并在 `stats` 中回报 `tbhits`。
 - **开局定式与体系识别**：集成常用定式前缀与 Kit 开局库，精准标记 `opening` 名称、定式匹配步数与 `theory: true/false`。
 - **目标深度严格保障与档位机制**：支持纯深度驱动档位（`lightning`/`fast`：目标深度 22，不限时间预算，严格搜满 22 层即停并退出）与纯时间驱动档位（`deep`：时间预算 4.0 秒，深度上限 128 不设层数截断，根据时间充分深入推演；`ultra`：时间预算 10.0 秒）。
-- **双协议鉴权**：计算与评估接口同时兼容 `Authorization: Bearer <token>` 与 `X-Access-Token: <token>`，本机直连免口令；`openapi.json` 规范端点免口令开放。
+- **双协议鉴权**：所有计算、复盘与 OpenAPI 描述接口一律受访问门禁保护，请求头同时兼容 `Authorization: Bearer <token>` 与 `X-Access-Token: <token>`，本机直连免口令。
 
 错误码：401 访问口令缺失/错误（见下节）；404 模型名非法/不存在或会话不存在（已被淘汰）；400 预设不存在、FEN 非法、走法不合法或轮到引擎；501 引擎未接入（`IMPLEMENTED=False`）；500 其它异常（detail 形如 `"ExceptionType: message"`）。
 
